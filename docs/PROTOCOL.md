@@ -160,7 +160,7 @@ answer a client it cannot identify. The client keeps one registered link to an
 | Code | Command | Body |
 | --- | --- | --- |
 | 1 | store | mailboxId(16) token(24) deleteTag(32) blob |
-| 2 | fetch | n(u8) × SURB, m(u16) × mailboxId |
+| 2 | fetch | n(u8) × SURB, m(u16) × mailboxId (4 SURBs, ≤ 221 IDs per packet) |
 | 3 | delete | n(u8) × (mailboxId, hash, deleteKey) |
 | 4 | drop | cover traffic |
 | 5 | tokenReq | SURB → public credential |
@@ -208,6 +208,8 @@ cap is hit, the oldest blob in that scope goes first.
    hops are random active peers, chosen anew for every packet. If the first hop
    does not answer, it rebuilds the route.
 3. The recipient fetches from every mailbox relay it advertised within the TTL.
+   One fetch packet carries 4 SURBs and at most 221 mailbox IDs (27 contacts at
+   8 IDs each). Longer lists are split over several fetch packets.
    It hashes each blob and checks the seen set (kept for the TTL plus a day)
    *before* decrypting, then deletes the copy on that relay.
 4. Receipts are ordinary ratchet messages. When one arrives, the sender asks all

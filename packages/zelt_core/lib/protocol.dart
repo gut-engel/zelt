@@ -30,6 +30,12 @@ const int fetchSurbs = 4;
 const int fetchMaxIds =
     (payloadSize - 1 - 1 - fetchSurbs * Surb.encodedSize - 2) ~/ 16;
 
+/// Splits mailbox IDs into fetch-sized batches, one fetch packet each.
+List<List<Uint8List>> fetchBatches(List<Uint8List> ids) => [
+  for (var i = 0; i < ids.length; i += fetchMaxIds)
+    ids.sublist(i, i + fetchMaxIds > ids.length ? ids.length : i + fetchMaxIds),
+];
+
 /// Handoff partners advertised in every reply.
 const int maxPartners = 2;
 

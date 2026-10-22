@@ -1059,8 +1059,7 @@ class Messenger {
     // Index loop: partners get appended while we iterate.
     for (var t = 0; t < targets.length; t++) {
       final target = targets[t];
-      for (var i = 0; i < ids.length; i += fetchMaxIds) {
-        final chunk = ids.sublist(i, min(i + fetchMaxIds, ids.length));
+      for (final chunk in fetchBatches(ids)) {
         for (var round = 0; round < 5; round++) {
           final replies = await _request(target, fetchSurbs, (s) => FetchCmd(s, chunk).encode());
           if (replies.isEmpty) break;

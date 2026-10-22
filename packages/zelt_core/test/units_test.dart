@@ -12,6 +12,8 @@ import 'package:zelt_core/pairing.dart';
 import 'package:zelt_core/peers.dart';
 import 'package:zelt_core/relay_store.dart';
 import 'package:zelt_core/tokens.dart';
+import 'package:zelt_core/protocol.dart';
+import 'package:zelt_core/sphinx.dart';
 import 'package:zelt_core/vault.dart';
 
 RelayInfo ri(String ip, [int port = 1]) =>
@@ -128,6 +130,22 @@ void main() {
     ).encode();
     // ~1000 bytes in QR byte mode is version ~22 at level L.
     expect(code.length, lessThan(1000));
+  });
+
+  test('fetch batches: every packet fits, every mailbox ID is covered', () async {
+    final ids = [for (var i = 0; i < 1000; i++) randomBytes(16)];
+    final batches = fetchBatches(ids);
+    expect(batches.length, (1000 / fetchMaxIds).ceil());
+    expect(batches.every((b) => b.length <= fetchMaxIds), isTrue);
+    expect([for (final b in batches) ...b.map(hex)], [for (final i in ids) hex(i)]);
+    final k = await Crypto.x25519Generate();
+    final hop = Hop(RelayInfo(NodeAddr(InternetAddress.loopbackIPv4, 1), k.pub));
+    final surbs = [for (var i = 0; i < fetchSurbs; i++) (await Sphinx.surb([hop, hop, hop, hop], randomBytes(8))).$1];
+    for (final b in batches) {
+      final encoded = FetchCmd(surbs, b).encode(); // throws if it overflowed
+      expect(encoded.length, payloadSize);
+      expect(FetchCmd.decode(ByteReader(encoded.sublist(1))).mailboxIds.length, b.length);
+    }
   });
 
   group('envelope', () {

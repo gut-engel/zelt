@@ -9,7 +9,10 @@ import 'package:zelt_core/bytes.dart';
 import 'package:zelt_core/constants.dart';
 import 'package:zelt_core/messenger.dart';
 import 'package:zelt_core/models.dart';
+import 'package:zelt_core/crypto.dart';
 import 'package:zelt_core/node.dart';
+import 'package:zelt_core/pairing.dart';
+import 'package:zelt_core/protocol.dart';
 
 final debugLogs = <Messenger>[];
 
@@ -62,6 +65,30 @@ Future<Messenger> messenger(String name, {bool relay = true, CoverMode cover = C
   );
   debugLogs.add(m);
   return m;
+}
+
+/// A contact that never sends anything, only adds mailbox IDs to poll.
+Future<Contact> dummyContact() async {
+  final id = randomBytes(32);
+  ConversationKeys k() => ConversationKeys(
+    initiator: true,
+    rk0: randomBytes(32),
+    mboxOut: randomBytes(32),
+    mboxIn: randomBytes(32),
+    envOut: randomBytes(32),
+    envIn: randomBytes(32),
+    delOut: randomBytes(32),
+    delIn: randomBytes(32),
+    safetyNumber: '',
+  );
+  return Contact(
+    id: hex(id),
+    name: 'dummy',
+    idPub: id,
+    keys: k(),
+    myEph: await Crypto.x25519Generate(),
+    theirEph: randomBytes(32),
+  );
 }
 
 Future<(Contact, Contact)> pair(Messenger a, Messenger b) async {
@@ -298,6 +325,31 @@ void main() {
     alice.peers.refresh();
     expect(alice.peers.pick(1), isEmpty);
     await until(() => alice.peers.pick(1).isNotEmpty, 'recovered from history', max: const Duration(seconds: 10));
+  });
+
+  test('more contacts than one fetch packet holds: later batches are fetched too', () async {
+    final alice = await messenger('alice');
+    // No relay of his own: all of Bob's mail must come through remote fetches.
+    final bob = await messenger('bob', relay: false);
+    cleanup.addAll([alice, bob]);
+    // 40 other contacts first, so Alice's mailbox IDs land beyond the first
+    // fetch packet (${fetchMaxIds} IDs, ${mailboxLookback + 1} per contact).
+    for (var i = 0; i < 40; i++) {
+      final c = await dummyContact();
+      bob.contacts[c.id] = c;
+    }
+    expect(40 * (mailboxLookback + 1), greaterThan(fetchMaxIds));
+    await alice.start();
+    await bob.start();
+    await addRelays(alice);
+    await addRelays(bob);
+    final (ab, ba) = await pair(alice, bob);
+    expect(bob.contacts.keys.last, ba.id);
+    await until(() => ab.ready && ba.ready, 'handshake');
+    expect(bob.mailboxes.values.any((m) => m.own), isFalse);
+    await alice.sendText(ab.id, 'found in a later batch');
+    await until(() => ba.messages.any((x) => x.text == 'found in a later batch'), 'delivery');
+    expect(bob.logLines.any((l) => l.startsWith(RegExp(r'\S+ fetched'))), isTrue);
   });
 
   test('share string round trip', () async {
