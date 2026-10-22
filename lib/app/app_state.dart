@@ -12,6 +12,7 @@ import 'package:zelt_core/models.dart';
 import 'package:zelt_core/vault.dart';
 
 import 'hardware_key.dart';
+import 'media_view.dart';
 import 'updater.dart';
 
 enum Phase { loading, setup, locked, unlocked }
@@ -171,6 +172,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> _attach(Messenger msgr) async {
     messenger = msgr;
+    msgr.media = VaultMediaStore(_vault!);
     msgr.onSave = (s) => _vault!.save(s);
     msgr.onLogLine = (l) => debugPrint('zelt: $l');
     msgr.onIncoming = (c, msg) {

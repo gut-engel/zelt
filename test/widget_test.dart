@@ -7,6 +7,9 @@ import 'package:zelt_core/messenger.dart';
 import 'package:zelt_core/models.dart';
 import 'package:zelt/app/screens/pair_screen.dart';
 import 'package:zelt/main.dart';
+import 'package:zelt/app/media_view.dart';
+import 'package:zelt_core/bytes.dart';
+import 'package:zelt_core/media.dart';
 
 void main() {
   testWidgets('first launch shows identity setup', (tester) async {
@@ -25,6 +28,7 @@ void main() {
 
   screens();
   pairScreen();
+  mediaScreens();
   pairQrAutoHide();
 }
 
@@ -140,6 +144,30 @@ void pairQrAutoHide() {
     expect(find.byType(QrImageView), findsOneWidget);
     await tester.pump(const Duration(seconds: 3));
     expect(find.byType(QrImageView), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(seconds: 1));
+  });
+}
+
+void mediaScreens() {
+  testWidgets('chat shows image and sticker messages; the sticker picker opens', (tester) async {
+    final app = await unlockedWithFriend(tester);
+    final c = app.m.contacts.values.single;
+    MediaRef ref(MediaKind k, int w, int h) =>
+        MediaRef(hash: randomBytes(32), size: 1000, kind: k, format: MediaFormat.webp, width: w, height: h);
+    c.messages
+      ..add(Message(id: 'img', outgoing: false, text: 'a caption', time: DateTime.now(), media: ref(MediaKind.image, 1280, 960)))
+      ..add(Message(id: 'stk', outgoing: true, text: '', time: DateTime.now(), media: ref(MediaKind.sticker, 256, 256)));
+    await tester.pumpWidget(ChangeNotifierProvider.value(value: app, child: const ZeltApp()));
+    await tester.tap(find.text('Robin'));
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.byType(MediaView), findsNWidgets(2), reason: 'placeholders until the bytes arrive');
+    expect(find.text('a caption'), findsOneWidget);
+    await tester.tap(find.byTooltip('Stickers'));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.byKey(const Key('addSticker')), findsOneWidget);
+    expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
     await tester.pump(const Duration(seconds: 1));
   });

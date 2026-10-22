@@ -5,6 +5,7 @@ import 'bytes.dart';
 import 'constants.dart';
 import 'crypto.dart';
 import 'invite.dart';
+import 'media.dart';
 import 'pairing.dart';
 import 'ratchet.dart';
 import 'tokens.dart';
@@ -69,6 +70,9 @@ class Message {
   final DateTime? sentAt;
   MsgStatus status;
 
+  /// An image or sticker ([text] is the image caption).
+  final MediaRef? media;
+
   Message({
     required this.id,
     required this.outgoing,
@@ -76,6 +80,7 @@ class Message {
     required this.time,
     this.sentAt,
     this.status = MsgStatus.queued,
+    this.media,
   });
 
   Map<String, dynamic> toJson() => {
@@ -85,6 +90,7 @@ class Message {
     'ts': time.millisecondsSinceEpoch,
     if (sentAt != null) 'sa': sentAt!.millisecondsSinceEpoch,
     's': status.name,
+    if (media != null) 'm': media!.toJson(),
   };
 
   factory Message.fromJson(Map<String, dynamic> j) => Message(
@@ -94,6 +100,7 @@ class Message {
     time: DateTime.fromMillisecondsSinceEpoch(j['ts']),
     sentAt: j['sa'] == null ? null : DateTime.fromMillisecondsSinceEpoch(j['sa']),
     status: MsgStatus.values.byName(j['s']),
+    media: j['m'] == null ? null : MediaRef.fromJson(j['m']),
   );
 }
 
@@ -129,6 +136,10 @@ class Contact {
   /// Joined by invite text: our join request, until the inviter answers.
   PendingJoin? pendingJoin;
 
+  /// Media we sent to this contact, newest last: the only hashes we serve
+  /// to them on request.
+  final List<String> sentMedia;
+
   DateTime? lastHelloSent;
   DateTime? lastUpdateSent;
   DateTime? lastUpdateRequest;
@@ -153,6 +164,7 @@ class Contact {
     List<Credential>? theirMailboxes,
     this.slot = 0,
     this.pendingJoin,
+    List<String>? sentMedia,
     this.lastHelloSent,
     this.lastUpdateSent,
     this.lastUpdateRequest,
@@ -161,6 +173,7 @@ class Contact {
     List<Message>? messages,
   }) : theirRelays = theirRelays ?? [],
        theirMailboxes = theirMailboxes ?? [],
+       sentMedia = sentMedia ?? [],
        messages = messages ?? [];
 
   bool get ready => ratchet != null;
@@ -188,6 +201,7 @@ class Contact {
     'theirMailboxes': [for (final g in theirMailboxes) g.toJson()],
     'slot': slot,
     if (pendingJoin != null) 'pj': pendingJoin!.toJson(),
+    if (sentMedia.isNotEmpty) 'sm': sentMedia,
     if (lastHelloSent != null) 'lhs': lastHelloSent!.millisecondsSinceEpoch,
     if (lastUpdateSent != null) 'lus': lastUpdateSent!.millisecondsSinceEpoch,
     if (lastUpdateRequest != null) 'lur': lastUpdateRequest!.millisecondsSinceEpoch,
@@ -215,6 +229,7 @@ class Contact {
     theirMailboxes: [for (final g in j['theirMailboxes'] ?? []) Credential.fromJson(g)],
     slot: j['slot'] ?? 0,
     pendingJoin: j['pj'] == null ? null : PendingJoin.fromJson(j['pj']),
+    sentMedia: (j['sm'] as List? ?? []).cast<String>(),
     lastHelloSent: _t(j['lhs']),
     lastUpdateSent: _t(j['lus']),
     lastUpdateRequest: _t(j['lur']),

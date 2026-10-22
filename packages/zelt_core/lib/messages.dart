@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'address.dart';
 import 'bytes.dart';
+import 'media.dart';
 import 'onion.dart';
 import 'tokens.dart';
 
@@ -115,7 +116,10 @@ class Hello {
   }
 }
 
-enum MsgType { text, receipt, update, updateRequest }
+enum MsgType { text, receipt, update, updateRequest, image, sticker, mediaChunk, mediaRequest }
+
+/// Most chunk indices one media request may list.
+const int maxRequestIndices = 200;
 
 /// Plaintext inside the Double Ratchet.
 class ChatMsg {
@@ -126,6 +130,18 @@ class ChatMsg {
   final List<Uint8List> receiptFor;
   final AddressInfo? info;
 
+  /// image / sticker.
+  final MediaRef? media;
+
+  /// mediaChunk / mediaRequest: the media hash.
+  final Uint8List? mediaHash;
+  final int chunkIndex;
+  final int chunkTotal;
+  final Uint8List? chunkData;
+
+  /// mediaRequest: missing chunk indices (empty: all).
+  final List<int> indices;
+
   ChatMsg(
     this.type,
     this.id, {
@@ -133,6 +149,12 @@ class ChatMsg {
     this.text = '',
     this.receiptFor = const [],
     this.info,
+    this.media,
+    this.mediaHash,
+    this.chunkIndex = 0,
+    this.chunkTotal = 0,
+    this.chunkData,
+    this.indices = const [],
   });
 
   Uint8List encode() {
@@ -153,6 +175,27 @@ class ChatMsg {
         info!.write(w);
       case MsgType.updateRequest:
         break;
+      case MsgType.image:
+        w
+          ..u64(timestamp)
+          ..str(text);
+        media!.write(w);
+      case MsgType.sticker:
+        w.u64(timestamp);
+        media!.write(w);
+      case MsgType.mediaChunk:
+        w
+          ..bytes(mediaHash!)
+          ..u16(chunkIndex)
+          ..u16(chunkTotal)
+          ..varBytes(chunkData!);
+      case MsgType.mediaRequest:
+        w
+          ..bytes(mediaHash!)
+          ..u16(indices.length);
+        for (final i in indices) {
+          w.u16(i);
+        }
     }
     return w.toBytes();
   }
@@ -172,6 +215,27 @@ class ChatMsg {
         return ChatMsg(type, id, info: AddressInfo.read(r));
       case MsgType.updateRequest:
         return ChatMsg(type, id);
+      case MsgType.image:
+        final ts = r.u64();
+        final text = r.str();
+        return ChatMsg(type, id, timestamp: ts, text: text, media: MediaRef.read(r));
+      case MsgType.sticker:
+        final ts = r.u64();
+        return ChatMsg(type, id, timestamp: ts, media: MediaRef.read(r));
+      case MsgType.mediaChunk:
+        final h = r.bytes(32);
+        final i = r.u16();
+        final n = r.u16();
+        final data = r.varBytes();
+        if (n == 0 || i >= n || n > chunkCount(maxImageBytes) || data.isEmpty || data.length > mediaChunkSize) {
+          throw const FormatException('media chunk');
+        }
+        return ChatMsg(type, id, mediaHash: h, chunkIndex: i, chunkTotal: n, chunkData: data);
+      case MsgType.mediaRequest:
+        final h = r.bytes(32);
+        final n = r.u16();
+        if (n > maxRequestIndices) throw const FormatException('too many indices');
+        return ChatMsg(type, id, mediaHash: h, indices: [for (var i = 0; i < n; i++) r.u16()]);
     }
   }
 }

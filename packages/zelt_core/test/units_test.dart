@@ -327,6 +327,30 @@ void main() {
     });
   });
 
+  test('vault media blobs: encrypted, names hidden, tamper rejected', () async {
+    final d = await Directory.systemTemp.createTemp('zelt');
+    try {
+      final v = await Vault.create(d, '1234');
+      final data = Uint8List.fromList(List.generate(5000, (i) => i % 251));
+      final name = hex(randomBytes(32));
+      await v.writeBlob(name, data);
+      expect(await v.readBlob(name), data);
+      expect(await v.hasBlob(name), isTrue);
+      expect(await v.readBlob(hex(randomBytes(32))), isNull);
+      final files = Directory('${d.path}/media').listSync().whereType<File>().toList();
+      expect(files.single.path.contains(name.substring(0, 16)), isFalse, reason: 'file name is a keyed hash');
+      expect(files.single.readAsBytesSync().length, 12 + data.length + 16);
+      final again = await Vault.unlock(d, '1234');
+      expect(await again.readBlob(name), data);
+      final b = files.single.readAsBytesSync();
+      b[40] ^= 1;
+      files.single.writeAsBytesSync(b);
+      expect(await again.readBlob(name), isNull, reason: 'tampered blob');
+    } finally {
+      await d.delete(recursive: true);
+    }
+  });
+
   test('vault: create, save, unlock, wrong pin, change pin', () async {
     final d = await Directory.systemTemp.createTemp('zelt');
     try {

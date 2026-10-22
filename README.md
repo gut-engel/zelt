@@ -11,6 +11,10 @@ See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the wire format and design choices.
 
 ## Features
 
+- Photos and stickers (including animated ones from your own GIFs): compact
+  WebP, metadata stripped, decoded only by a memory-safe pure-Dart decoder in a
+  sandboxed isolate (no zero-click surface). Stickers travel as a hash; a
+  friend fetches the content from you once.
 - Adding a friend takes one action by one person: scan their QR code in person
   (one use, 10 minutes), or paste their one-time invite text (one use,
   15 minutes). Both devices are linked; a safety number lets you check.

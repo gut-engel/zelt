@@ -11,6 +11,7 @@ import 'constants.dart';
 import 'crypto.dart';
 import 'envelope.dart';
 import 'invite.dart';
+import 'media.dart';
 import 'messages.dart';
 import 'models.dart';
 import 'node.dart';
@@ -71,6 +72,22 @@ const Duration deliveryBudget = Duration(seconds: 10);
 /// Mixing delay allowed on one delivery (sender path + watch reply path),
 /// leaving the rest of [deliveryBudget] for the network and processing.
 const int mixBudgetMs = 6000;
+
+/// An incoming media transfer being reassembled (RAM only; after a restart
+/// the missing parts are requested again).
+class _Transfer {
+  final String contactId;
+  MediaRef? ref;
+  final int total;
+  final Map<int, Uint8List> parts = {};
+  DateTime lastActivity = DateTime.now();
+  DateTime? lastRequest;
+  int requests = 0;
+  _Transfer(this.contactId, this.total);
+
+  int get buffered => parts.values.fold(0, (n, p) => n + p.length);
+  List<int> get missing => [for (var i = 0; i < total; i++) if (!parts.containsKey(i)) i];
+}
 
 /// A pairing in progress: our half of the QR exchange.
 class PairingSession {
@@ -133,6 +150,17 @@ class Messenger {
 
   /// Invite mailbox IDs on the relay being polled or watched.
   final Map<String, PendingInvite> _inviteIds = {};
+
+  /// Media bytes (the app sets an encrypted store).
+  MediaStore media = MemoryMediaStore();
+
+  /// The user's own sticker library, newest last.
+  final List<MediaRef> stickers = [];
+
+  final Map<String, _Transfer> _transfers = {};
+  final Set<String> _haveMedia = {};
+  final Map<String, DateTime> _lastServed = {};
+  final Map<String, (DateTime, int)> _servedThisHour = {};
 
   final _changes = StreamController<void>.broadcast();
   final _log = <String>[];
@@ -202,20 +230,43 @@ class Messenger {
 
   static const _lockKey = #zeltMessengerLock;
 
-  /// Serialises ratchet and receive state changes. Reentrant: code already
-  /// holding the lock runs directly.
+  /// The token of the code currently holding [_locked].
+  Object? _lockHolder;
+
+  /// Serialises ratchet and receive state changes. Reentrant: code running
+  /// inside the current holder's call runs directly. Each acquisition has its
+  /// own token, so a timer or detached future that merely inherited the zone
+  /// of an earlier (or the current) holder waits its turn instead of
+  /// slipping past the lock.
   Future<T> _locked<T>(Future<T> Function() f) {
-    if (Zone.current[_lockKey] == this) return f();
+    final z = Zone.current[_lockKey];
+    if (z != null && identical(z, _lockHolder)) return f();
     final c = Completer<T>();
     _lock = _lock.then((_) async {
+      final token = Object();
+      _lockHolder = token;
       try {
-        c.complete(await runZoned(f, zoneValues: {_lockKey: this}));
+        c.complete(await runZoned(f, zoneValues: {_lockKey: token}));
       } catch (e, st) {
         c.completeError(e, st);
+      } finally {
+        _lockHolder = null;
       }
     });
     return c.future;
   }
+
+  /// Zone for background work: carries no lock token (so it queues for
+  /// [_locked] like any other caller) and logs errors nobody awaited.
+  late final Zone _bg = Zone.root.fork(
+    specification: ZoneSpecification(
+      handleUncaughtError: (self, parent, zone, e, st) => log('background task failed: $e'),
+    ),
+  );
+
+  /// Starts [f] outside any lock holder's zone: it queues for the lock like
+  /// any other caller instead of running alongside the holder.
+  void _detach(Future<void> Function() f) => _bg.run(() => unawaited(f()));
 
   // --- Persistence -----------------------------------------------------
 
@@ -229,6 +280,7 @@ class Messenger {
     'held': [for (final h in held) h.toJson()],
     'mailboxes': [for (final m in mailboxes.values) m.toJson()],
     'invites': [for (final i in invites.values) i.toJson()],
+    'stickers': [for (final s in stickers) s.toJson()],
     'nextSlot': nextSlot,
     'advertised': _advertised.toList(),
     'certs': node.certs.toJson(),
@@ -283,6 +335,7 @@ class Messenger {
       final inv = PendingInvite.fromJson(i);
       m.invites[inv.id] = inv;
     }
+    m.stickers.addAll([for (final s in j['stickers'] ?? []) MediaRef.fromJson(s)]);
     m._advertised = {...(j['advertised'] as List? ?? []).cast<String>()};
     m.node.certs.loadJson(j['certs'] as List? ?? []);
     if (j['peers'] != null) m.peers.loadJson(j['peers']);
@@ -313,16 +366,20 @@ class Messenger {
     _started = true;
     await _migrateOutbox();
     await node.start(relay: settings.relay);
-    peers.refresh(minRequired: settings.hops);
-    await _refreshMailboxes();
-    _schedulePoll();
-    _scheduleWatch();
-    node.onEntryChanged = _rewatchAll;
-    _rewatchAll();
-    _timers.add(Timer.periodic(timings.tick, (_) => _maintenance()));
-    _setupCover();
-    unawaited(_maintenance());
-    unawaited(pollNow());
+    // Timers and background work live in [_bg]: errors nobody awaits (a
+    // relay that vanished mid-request) are logged, not thrown at the caller.
+    await _bg.run(() async {
+      peers.refresh(minRequired: settings.hops);
+      await _refreshMailboxes();
+      _schedulePoll();
+      _scheduleWatch();
+      node.onEntryChanged = _rewatchAll;
+      _rewatchAll();
+      _timers.add(Timer.periodic(timings.tick, (_) => _maintenance()));
+      _setupCover();
+      unawaited(_maintenance());
+      unawaited(pollNow());
+    });
   }
 
   /// Clean shutdown: hands stored relay blobs to partners, then stops.
@@ -576,14 +633,8 @@ class Messenger {
     cancelInvite(inv.id);
     await save();
     log('invite used by ${theirs.name.isEmpty ? 'a friend' : theirs.name}');
-    // Outside the receive lock (root zone: the lock is reentrant per zone).
-    Zone.root.run(() => unawaited(() async {
-      try {
-        await completePairingWith(PairingSession(inv.eph, inv.seed, inv.slot, inv.text), theirs);
-      } catch (e) {
-        log('pairing by invite failed: $e');
-      }
-    }()));
+    // Outside the receive lock.
+    _detach(() => completePairingWith(PairingSession(inv.eph, inv.seed, inv.slot, inv.text), theirs));
     return del;
   }
 
@@ -972,6 +1023,249 @@ class Messenger {
       await _dispatch(item);
     }
     return m;
+  }
+
+  // --- Images and stickers --------------------------------------------
+
+  Future<void> _enqueue(Contact c, ChatMsg chat) async {
+    final item = OutItem(id: hex(chat.id), contactId: c.id, pending: chat.encode());
+    outbox.add(item);
+    _changed();
+    if (c.ready) {
+      await _seal(c, item);
+      await _dispatch(item);
+    }
+  }
+
+  static MediaRef _checkedRef(Uint8List bytes, MediaKind kind, int width, int height) {
+    final format = MediaFormat.sniff(bytes);
+    if (format == null || !MediaFormat.allowed(kind, format)) throw ArgumentError('unsupported format');
+    final ref = MediaRef(
+      hash: CryptoSync.sha256(bytes),
+      size: bytes.length,
+      kind: kind,
+      format: format,
+      width: width,
+      height: height,
+    );
+    // Same limits a receiver applies.
+    final w = ByteWriter();
+    ref.write(w);
+    MediaRef.read(ByteReader(w.toBytes()));
+    return ref;
+  }
+
+  Future<void> _store(String hash, Uint8List bytes) async {
+    await media.write(hash, bytes);
+    _haveMedia.add(hash);
+  }
+
+  Future<bool> hasMedia(String hash) async {
+    if (_haveMedia.contains(hash)) return true;
+    final ok = await media.has(hash);
+    if (ok) _haveMedia.add(hash);
+    return ok;
+  }
+
+  /// Fraction of an incoming transfer received so far (null: none running).
+  double? mediaProgress(String hash) {
+    final t = _transfers[hash];
+    return t == null ? null : t.parts.length / t.total;
+  }
+
+  void _rememberSent(Contact c, String hash) {
+    c.sentMedia
+      ..remove(hash)
+      ..add(hash);
+    if (c.sentMedia.length > 1000) c.sentMedia.removeAt(0);
+  }
+
+  /// Sends a WebP the app already scaled and re-encoded (metadata stripped).
+  Future<Message> sendImage(String contactId, Uint8List webp, {required int width, required int height, String caption = ''}) async {
+    final c = contacts[contactId];
+    if (c == null) throw StateError('unknown contact');
+    if (utf8.encode(caption).length > maxTextBytes ~/ 2) throw ArgumentError('caption too long');
+    final ref = _checkedRef(webp, MediaKind.image, width, height);
+    await _store(ref.id, webp);
+    final id = randomBytes(16);
+    final now = DateTime.now();
+    final m = Message(id: hex(id), outgoing: true, text: caption, time: now, media: ref);
+    c.messages.add(m);
+    _rememberSent(c, ref.id);
+    await _enqueue(c, ChatMsg(MsgType.image, id, timestamp: now.millisecondsSinceEpoch, text: caption, media: ref));
+    await _sendChunks(c, ref.id, webp);
+    return m;
+  }
+
+  /// Adds a sticker (normalised WebP from the app) to our library.
+  Future<MediaRef> addSticker(Uint8List bytes, {required int width, required int height}) async {
+    final ref = _checkedRef(bytes, MediaKind.sticker, width, height);
+    await _store(ref.id, bytes);
+    stickers
+      ..removeWhere((s) => s.id == ref.id)
+      ..add(ref);
+    _changed();
+    return ref;
+  }
+
+  /// Adds a sticker someone sent us to our own library (once its bytes are here).
+  Future<bool> saveSticker(MediaRef ref) async {
+    if (ref.kind != MediaKind.sticker || !await hasMedia(ref.id)) return false;
+    stickers
+      ..removeWhere((s) => s.id == ref.id)
+      ..add(ref);
+    _changed();
+    return true;
+  }
+
+  void removeSticker(String hash) {
+    stickers.removeWhere((s) => s.id == hash);
+    _changed();
+  }
+
+  /// Sends a sticker as its hash only; a friend without it asks us for it.
+  Future<Message> sendSticker(String contactId, MediaRef ref) async {
+    final c = contacts[contactId];
+    if (c == null) throw StateError('unknown contact');
+    if (ref.kind != MediaKind.sticker || !await hasMedia(ref.id)) throw ArgumentError('unknown sticker');
+    final id = randomBytes(16);
+    final now = DateTime.now();
+    final m = Message(id: hex(id), outgoing: true, text: '', time: now, media: ref);
+    c.messages.add(m);
+    _rememberSent(c, ref.id);
+    await _enqueue(c, ChatMsg(MsgType.sticker, id, timestamp: now.millisecondsSinceEpoch, media: ref));
+    return m;
+  }
+
+  Future<void> _sendChunks(Contact c, String hash, Uint8List bytes, [List<int> indices = const []]) async {
+    final total = chunkCount(bytes.length);
+    final which = indices.isEmpty ? [for (var i = 0; i < total; i++) i] : indices.where((i) => i < total).toSet().toList();
+    for (final i in which) {
+      final start = i * mediaChunkSize;
+      final data = Uint8List.sublistView(bytes, start, min(start + mediaChunkSize, bytes.length));
+      await _enqueue(
+        c,
+        ChatMsg(MsgType.mediaChunk, randomBytes(16), mediaHash: unhex(hash), chunkIndex: i, chunkTotal: total, chunkData: Uint8List.fromList(data)),
+      );
+    }
+  }
+
+  /// An image or sticker message arrived: get its bytes unless we have them.
+  Future<void> _expectMedia(Contact c, MediaRef ref) async {
+    if (await hasMedia(ref.id)) return;
+    final t = _transfers.putIfAbsent(ref.id, () => _Transfer(c.id, ref.chunks));
+    if (t.contactId != c.id || t.total != ref.chunks) {
+      _transfers[ref.id] = _Transfer(c.id, ref.chunks)..ref = ref;
+    } else {
+      t.ref = ref;
+      // Early chunks that do not fit the reference are dropped.
+      t.parts.removeWhere((i, p) => p.length != _chunkLen(ref, i));
+    }
+    final tr = _transfers[ref.id]!;
+    if (await _tryComplete(tr)) return;
+    // Stickers come by hash only: ask the sender for the bytes.
+    if (ref.kind == MediaKind.sticker && tr.parts.isEmpty) await _requestMedia(c, tr);
+  }
+
+  static int _chunkLen(MediaRef ref, int i) =>
+      i < ref.chunks - 1 ? mediaChunkSize : ref.size - mediaChunkSize * (ref.chunks - 1);
+
+  Future<void> _onChunk(Contact c, ChatMsg m) async {
+    final h = hex(m.mediaHash!);
+    if (await hasMedia(h)) return;
+    var t = _transfers[h];
+    if (t == null) {
+      // Arrived before its image message (paths differ): buffer a few, within
+      // the contact's budget.
+      if (_transfers.values.where((x) => x.contactId == c.id && x.ref == null).length >= 4) return;
+      t = _transfers[h] = _Transfer(c.id, m.chunkTotal);
+    }
+    if (t.contactId != c.id || m.chunkTotal != t.total) return;
+    final ref = t.ref;
+    if (ref != null && m.chunkData!.length != _chunkLen(ref, m.chunkIndex)) return;
+    final buffered = _transfers.values.where((x) => x.contactId == c.id).fold(0, (n, x) => n + x.buffered);
+    if (buffered + m.chunkData!.length > maxBufferedPerContact) return;
+    t.parts[m.chunkIndex] = m.chunkData!;
+    t.lastActivity = DateTime.now();
+    if (!await _tryComplete(t)) _changed();
+  }
+
+  Future<bool> _tryComplete(_Transfer t) async {
+    final ref = t.ref;
+    if (ref == null || t.parts.length < t.total) return false;
+    final b = BytesBuilder(copy: false);
+    for (var i = 0; i < t.total; i++) {
+      b.add(t.parts[i]!);
+    }
+    final bytes = b.toBytes();
+    if (bytes.length != ref.size || !bytesEqual(CryptoSync.sha256(bytes), ref.hash)) {
+      log('media ${ref.id.substring(0, 8)} did not match its hash; asking again');
+      t.parts.clear();
+      return false;
+    }
+    _transfers.remove(ref.id);
+    await _store(ref.id, bytes);
+    log('${ref.kind.name} ${ref.id.substring(0, 8)} received (${bytes.length} bytes)');
+    _changed();
+    return true;
+  }
+
+  Future<void> _requestMedia(Contact c, _Transfer t) async {
+    final ref = t.ref;
+    if (ref == null) return;
+    t.lastRequest = DateTime.now();
+    t.requests++;
+    final missing = t.missing;
+    final ask = missing.length == t.total ? <int>[] : missing.take(maxRequestIndices).toList();
+    await _enqueue(c, ChatMsg(MsgType.mediaRequest, randomBytes(16), mediaHash: ref.hash, indices: ask));
+  }
+
+  /// A friend asks for media bytes: answered only for what we sent them, and
+  /// rate-limited, so we cannot be used to fetch or flood.
+  Future<void> _onMediaRequest(Contact c, ChatMsg m) async {
+    final h = hex(m.mediaHash!);
+    if (!c.sentMedia.contains(h)) return;
+    final now = DateTime.now();
+    final key = '${c.id}/$h';
+    final last = _lastServed[key];
+    if (last != null && now.difference(last) < const Duration(seconds: 30)) return;
+    final bytes = await media.read(h);
+    if (bytes == null) return;
+    final n = m.indices.isEmpty ? chunkCount(bytes.length) : m.indices.length;
+    final (start, used) = _servedThisHour[c.id] ?? (now, 0);
+    final fresh = now.difference(start) > const Duration(hours: 1);
+    final count = (fresh ? 0 : used) + n;
+    if (count > maxServedChunksPerHour) {
+      log('media request from ${c.name} refused: hourly limit');
+      return;
+    }
+    _servedThisHour[c.id] = (fresh ? now : start, count);
+    _lastServed[key] = now;
+    log('serving ${h.substring(0, 8)} to ${c.name} ($n chunks)');
+    await _sendChunks(c, h, bytes, m.indices);
+  }
+
+  /// Requests missing bytes for incomplete media (also after a restart),
+  /// with backoff; drops stale buffers.
+  Future<void> _mediaMaintenance(DateTime now) async {
+    _transfers.removeWhere((_, t) =>
+        now.difference(t.lastActivity) > (t.ref == null ? const Duration(minutes: 5) : const Duration(hours: 6)));
+    for (final c in contacts.values) {
+      if (!c.ready) continue;
+      final recent = c.messages.length > 200 ? c.messages.sublist(c.messages.length - 200) : c.messages;
+      for (final msg in recent) {
+        final ref = msg.media;
+        if (ref == null || msg.outgoing || await hasMedia(ref.id)) continue;
+        final t = _transfers.putIfAbsent(ref.id, () => _Transfer(c.id, ref.chunks)..ref = ref);
+        if (t.contactId != c.id || t.requests >= 12) continue;
+        final idle = now.difference(t.lastActivity);
+        final backoff = Duration(seconds: 45 * (1 << min(t.requests, 6)));
+        final lr = t.lastRequest;
+        if (idle > const Duration(seconds: 45) && (lr == null || now.difference(lr) > backoff)) {
+          await _requestMedia(c, t);
+        }
+      }
+    }
   }
 
   Future<void> _sendControl(Contact c, MsgType type, {List<Uint8List> receipts = const []}) async {
@@ -1673,7 +1967,27 @@ class Messenger {
       case MsgType.update:
         await _applyInfo(c, m.info!);
       case MsgType.updateRequest:
-        unawaited(_sendControl(c, MsgType.update));
+        _detach(() => _sendControl(c, MsgType.update));
+      case MsgType.image || MsgType.sticker:
+        final id = hex(m.id);
+        if (c.messages.any((x) => x.id == id)) return;
+        final msg = Message(
+          id: id,
+          outgoing: false,
+          text: m.text,
+          time: DateTime.now(),
+          sentAt: DateTime.fromMillisecondsSinceEpoch(m.timestamp),
+          status: MsgStatus.delivered,
+          media: m.media,
+        );
+        c.messages.add(msg);
+        c.unread++;
+        onIncoming?.call(c, msg);
+        _detach(() => _expectMedia(c, m.media!));
+      case MsgType.mediaChunk:
+        await _onChunk(c, m);
+      case MsgType.mediaRequest:
+        _detach(() => _onMediaRequest(c, m));
     }
   }
 
@@ -1700,11 +2014,12 @@ class Messenger {
     final list = _pendingReceipts.putIfAbsent(c.id, () => []);
     list.add(msgId);
     if (list.length == 1) {
-      Timer(const Duration(milliseconds: 300), () {
+      _bg.createTimer(const Duration(milliseconds: 300), () {
         final ids = _pendingReceipts.remove(c.id) ?? [];
         if (ids.isEmpty) return;
         for (var i = 0; i < ids.length; i += 200) {
-          unawaited(_sendControl(c, MsgType.receipt, receipts: ids.sublist(i, min(i + 200, ids.length))));
+          final part = ids.sublist(i, min(i + 200, ids.length));
+          _detach(() => _sendControl(c, MsgType.receipt, receipts: part));
         }
       });
     }
@@ -1729,6 +2044,7 @@ class Messenger {
         unawaited(_announce());
       }
       _pruneInvites(now);
+      await _mediaMaintenance(now);
       await _refreshMailboxes();
       for (final c in contacts.values.toList()) {
         await _handshakeTick(c);

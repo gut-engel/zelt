@@ -402,6 +402,45 @@ restart, crash or kill loses everything else, by design:
    of relays, with exponential backoff. Duplicates are caught by the seen set, and then by
    the ratchet counter.
 
+## Images and stickers
+
+Media are content-addressed: `hash = SHA-256(bytes)`. On the wire everything is
+**WebP**: lossy VP8 for photos, lossy VP8 with alpha for stickers, animated when
+the source was (GIF imports become animated WebP).
+
+```
+MediaRef = hash(32) size(u32) kind(u8: 0 image, 1 sticker) format(u8: 4 = WebP) width(u16) height(u16)
+image        = ts(u64) caption(str) MediaRef          # chat message
+sticker      = ts(u64) MediaRef                       # chat message, hash only
+mediaChunk   = hash(32) index(u16) total(u16) data    # 6900 bytes per chunk, one ratchet message each
+mediaRequest = hash(32) n(u16) n × index(u16)         # n = 0: all chunks
+```
+
+- **Images** are pushed: the sender sends the image message, then its chunks.
+- **Stickers** carry only the hash. A friend who does not have it sends a
+  `mediaRequest`. The sender answers **only for hashes it sent to that friend**
+  (kept per contact), at most once per 30 s per hash and 400 chunks per hour per
+  friend, so nobody can use a device to fetch arbitrary content or to flood.
+- The receiver accepts reassembled bytes only if size and SHA-256 match the
+  reference. Chunks for unknown hashes are buffered only a little (4 transfers,
+  2 MB per friend, 5 minutes). Incomplete media is requested again with
+  backoff, also after a restart.
+- Limits, checked before anything is fetched: images ≤ 512 KB and ≤ 2048 px,
+  stickers ≤ 256 KB, ≤ 320 px and ≤ 80 frames; only WebP.
+
+**Zero-click hardening.** Received bytes never reach a native decoder (Skia,
+libwebp, the OS image stack). They are decoded by a pure-Dart, memory-safe
+decoder (`package:image`) in a separate isolate that is killed after 8 s, with
+a pixel budget, after the format, dimensions and frame count were checked.
+Only raw RGBA pixels go to the renderer (`decodeImageFromPixels`). The sender
+converts its own files the same way: photos are scaled to at most 1280 px,
+oriented, and re-encoded to about 120 KB, which drops all metadata (EXIF
+location, camera, ICC, text chunks); stickers are fitted into 256 px.
+
+**At rest** media sit in the vault: one file each, ChaCha20-Poly1305 with a key
+derived from the vault master key, file names `HMAC(nameKey, hash)` so the disk
+does not reveal which known pictures the device holds.
+
 ## Peers and discovery
 
 Target: 12 active peers. Friends' relay addresses come first, then manual

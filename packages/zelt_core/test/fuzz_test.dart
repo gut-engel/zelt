@@ -16,6 +16,7 @@ import 'package:zelt_core/constants.dart';
 import 'package:zelt_core/crypto.dart';
 import 'package:zelt_core/envelope.dart';
 import 'package:zelt_core/invite.dart';
+import 'package:zelt_core/media.dart';
 import 'package:zelt_core/link.dart';
 import 'package:zelt_core/messages.dart';
 import 'package:zelt_core/node.dart';
@@ -160,12 +161,21 @@ void main() {
     final hello = Hello(kemPk: randomBytes(1184), info: info).encode();
     final chat = ChatMsg(MsgType.text, randomBytes(16), timestamp: 1, text: 'hi').encode();
     final update = ChatMsg(MsgType.update, randomBytes(16), info: info).encode();
+    final mref = MediaRef(hash: randomBytes(32), size: 5000, kind: MediaKind.sticker, format: MediaFormat.webp, width: 200, height: 200);
+    final mediaMsgs = [
+      ChatMsg(MsgType.image, randomBytes(16), timestamp: 1, text: 'c',
+          media: MediaRef(hash: randomBytes(32), size: 90000, kind: MediaKind.image, format: MediaFormat.webp, width: 1280, height: 720)).encode(),
+      ChatMsg(MsgType.sticker, randomBytes(16), timestamp: 1, media: mref).encode(),
+      ChatMsg(MsgType.mediaChunk, randomBytes(16), mediaHash: randomBytes(32), chunkIndex: 2, chunkTotal: 5, chunkData: randomBytes(mediaChunkSize)).encode(),
+      ChatMsg(MsgType.mediaRequest, randomBytes(16), mediaHash: randomBytes(32), indices: [1, 2, 3]).encode(),
+    ];
     final code = PairingCode(idPub: randomBytes(32), ephPub: randomBytes(32), seed: randomBytes(32), name: 'x', relays: [relay], grants: [cred]).encode();
     final codeBytes = unb64(code.substring(PairingCode.prefix.length));
 
     for (var i = 0; i < iterations; i++) {
       mustNotCrash('Hello', () => Hello.decode(i.isEven ? f.mutate(hello) : f.random(800)));
       mustNotCrash('ChatMsg', () => ChatMsg.decode(f.mutate(i.isEven ? chat : update)));
+      mustNotCrash('media ChatMsg', () => ChatMsg.decode(f.mutate(mediaMsgs[i % mediaMsgs.length])));
       mustNotCrash('AddressInfo', () => AddressInfo.read(ByteReader(f.mutate(i.isEven ? hello.sublist(1188) : f.random(300)))));
       mustNotCrash('PairingCode', () => PairingCode.parse(PairingCode.prefix + b64(f.mutate(codeBytes))));
       mustNotCrash('PairingCode text', () => PairingCode.parse(String.fromCharCodes(f.random(200))));

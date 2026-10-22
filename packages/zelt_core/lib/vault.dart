@@ -212,6 +212,48 @@ class Vault {
     await _atomicWrite(_state(dir), concat([nonce, ct]));
   }
 
+  // --- Media blobs ----------------------------------------------------
+
+  Uint8List? _mediaNameKey;
+  Uint8List? _mediaEncKey;
+
+  Future<(Uint8List, Uint8List)> _mediaKeys() async {
+    _mediaNameKey ??= await Crypto.hkdf(_master, info: 'zelt/media/name/v1');
+    _mediaEncKey ??= await Crypto.hkdf(_master, info: 'zelt/media/enc/v1');
+    return (_mediaNameKey!, _mediaEncKey!);
+  }
+
+  /// File for a blob. The name is a keyed hash, so the files do not reveal
+  /// which (known) media this device holds.
+  Future<File> _blobFile(String name) async {
+    final (nk, _) = await _mediaKeys();
+    final fn = hex(await Crypto.hmac(nk, utf8.encode(name))).substring(0, 40);
+    return File('${dir.path}/media/$fn');
+  }
+
+  Future<void> writeBlob(String name, Uint8List data) async {
+    final (_, ek) = await _mediaKeys();
+    final f = await _blobFile(name);
+    await f.parent.create(recursive: true);
+    final nonce = randomBytes(12);
+    await _atomicWrite(f, concat([nonce, await Crypto.seal(ek, nonce, data, aad: utf8.encode(name))]));
+  }
+
+  Future<Uint8List?> readBlob(String name) async {
+    final f = await _blobFile(name);
+    if (!await f.exists()) return null;
+    final b = await f.readAsBytes();
+    if (b.length < 28) return null;
+    final (_, ek) = await _mediaKeys();
+    try {
+      return await Crypto.open(ek, b.sublist(0, 12), b.sublist(12), aad: utf8.encode(name));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<bool> hasBlob(String name) async => (await _blobFile(name)).exists();
+
   /// Deletes everything, irreversibly.
   static Future<void> wipe(Directory d) async {
     if (await d.exists()) await d.delete(recursive: true);
