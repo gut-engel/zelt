@@ -11,6 +11,7 @@ import 'package:zelt_core/messenger.dart';
 import 'package:zelt_core/models.dart';
 import 'package:zelt_core/vault.dart';
 
+import 'hardware_key.dart';
 import 'updater.dart';
 
 enum Phase { loading, setup, locked, unlocked }
@@ -146,14 +147,14 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> setup(String name, String pin) async {
-    _vault = await Vault.create(_dir, pin);
+    _vault = await Vault.create(_dir, pin, hardware: await AndroidKeystoreWrapper.open());
     final msgr = Messenger(identity: await Identity.generate(), settings: Settings(name: name));
     await _attach(msgr);
   }
 
-  /// Throws [WrongPin].
+  /// Throws [WrongPin], or [LockedOut] after too many wrong PINs.
   Future<void> unlock(String pin) async {
-    final v = await Vault.unlock(_dir, pin);
+    final v = await Vault.unlock(_dir, pin, hardware: await AndroidKeystoreWrapper.open());
     final state = await v.load();
     _vault = v;
     final msgr = state == null
@@ -209,6 +210,24 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     phase = Phase.locked;
     await _call('stop');
     notifyListeners();
+  }
+
+  /// How the vault is protected, for the settings screen.
+  String get vaultFormat {
+    try {
+      return Vault.exists(_dir) ? Vault.formatOf(_dir) : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /// When the next PIN attempt is allowed (null: now).
+  DateTime? get lockedUntil {
+    try {
+      return Vault.exists(_dir) ? Vault.lockedUntil(_dir) : null;
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<void> changePin(String pin) async {

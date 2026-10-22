@@ -45,6 +45,27 @@ Each install generates:
   Onion keys below).
 - **Relay secret** (32 bytes). Derives token credentials (see below).
 
+## Local storage (vault)
+
+A random 256-bit master key encrypts the state (ChaCha20-Poly1305). `vault.json`
+holds that master key wrapped twice:
+
+```
+pinWrapped = nonce ‖ AEAD(Argon2id(PIN, salt, 64 MiB, 3 passes), master)
+v2 (Android): wrapped = Keystore-AES-256-GCM(pinWrapped)
+v1 (desktop): wrapped = pinWrapped
+```
+
+The Keystore key is non-exportable and lives in StrongBox when the phone has it,
+otherwise in the TEE. A copied vault is useless on any other device, because PIN
+guesses can only be tested through that hardware key. v1 vaults are re-wrapped as
+v2 on the next successful Android unlock.
+
+Wrong PINs: 4 are free, then a 30 s delay, doubling up to 1 h between attempts. The
+counter and lock time live in `vault.json`, so they survive restarts. Data is never
+wiped automatically. An attacker who can rewrite the app's files (root) can reset
+the counter, but still has to guess through this device's Keystore.
+
 ## Pairing
 
 Both phones show a QR code `zelt:1:<base64url>` and scan each other's:

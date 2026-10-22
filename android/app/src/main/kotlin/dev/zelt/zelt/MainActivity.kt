@@ -44,6 +44,17 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
                     "abi" -> result.success(Build.SUPPORTED_ABIS.firstOrNull())
+                    "kinfo" -> result.success(VaultKey.info())
+                    "kwrap" -> try {
+                        result.success(VaultKey.wrap(call.argument<ByteArray>("data")!!))
+                    } catch (e: Exception) {
+                        result.error("keystore", e.message, null)
+                    }
+                    "kunwrap" -> try {
+                        result.success(VaultKey.unwrap(call.argument<ByteArray>("data")!!))
+                    } catch (e: Exception) {
+                        result.error("keystore", e.message, null)
+                    }
                     "secure" -> {
                         // Blocks screenshots, screen recording and the recents
                         // thumbnail while a secret (the pairing QR) is shown.

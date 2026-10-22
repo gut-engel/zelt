@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
@@ -341,6 +342,69 @@ void main() {
     }
   });
 
+  group('vault v2 (hardware-bound) and lockout', () {
+    late Directory d;
+    setUp(() async => d = await Directory.systemTemp.createTemp('zelt'));
+    tearDown(() async => d.delete(recursive: true));
+
+    Map<String, dynamic> meta() => jsonDecode(File('${d.path}/vault.json').readAsStringSync());
+    void writeMeta(Map<String, dynamic> m) => File('${d.path}/vault.json').writeAsStringSync(jsonEncode(m));
+
+    test('a copied vault cannot be opened without this device\'s hardware key', () async {
+      final hw = FakeHardware();
+      final v = await Vault.create(d, 'correct horse', hardware: hw);
+      await v.save({'secret': 1});
+      expect(Vault.formatOf(d), 'v2 (tee)');
+      expect(await (await Vault.unlock(d, 'correct horse', hardware: hw)).load(), {'secret': 1});
+      // Same files, other device: right PIN, wrong hardware key.
+      await expectLater(Vault.unlock(d, 'correct horse', hardware: FakeHardware()), throwsA(isA<WrongPin>()));
+      await expectLater(Vault.unlock(d, 'correct horse'), throwsStateError);
+    });
+
+    test('escalating delays after 4 wrong PINs, persisted, blocking even the right PIN', () async {
+      final hw = FakeHardware();
+      await Vault.create(d, '123456', hardware: hw);
+      for (var i = 0; i < Vault.freeAttempts; i++) {
+        await expectLater(Vault.unlock(d, 'wrong', hardware: hw), throwsA(isA<WrongPin>()));
+      }
+      expect(Vault.lockedUntil(d), isNull);
+      await expectLater(Vault.unlock(d, 'wrong', hardware: hw), throwsA(isA<WrongPin>()));
+      final until = Vault.lockedUntil(d)!;
+      expect(until.difference(DateTime.now()).inSeconds, inInclusiveRange(25, 30));
+      await expectLater(Vault.unlock(d, '123456', hardware: hw), throwsA(isA<LockedOut>()));
+      // Survives a restart: the state is in vault.json.
+      expect(meta()['failed'], 5);
+      // Once the delay has passed, the right PIN works and resets the counter.
+      writeMeta(meta()..['lockUntil'] = DateTime.now().subtract(const Duration(seconds: 1)).millisecondsSinceEpoch);
+      await Vault.unlock(d, '123456', hardware: hw);
+      expect(meta()['failed'], 0);
+      expect(Vault.lockedUntil(d), isNull);
+    });
+
+    test('delay schedule', () {
+      expect(Vault.delayAfter(4), Duration.zero);
+      expect(Vault.delayAfter(5), const Duration(seconds: 30));
+      expect(Vault.delayAfter(6), const Duration(seconds: 60));
+      expect(Vault.delayAfter(11), const Duration(seconds: 1920));
+      expect(Vault.delayAfter(12), Vault.maxDelay, reason: '3840 s would exceed the 1 h cap');
+      expect(Vault.delayAfter(40), Vault.maxDelay);
+    });
+
+    test('a v1 vault is bound to the hardware key on the next unlock', () async {
+      final v = await Vault.create(d, '123456');
+      await v.save({'x': 2});
+      expect(Vault.formatOf(d), 'v1 (PIN only)');
+      final hw = FakeHardware();
+      expect(await (await Vault.unlock(d, '123456', hardware: hw)).load(), {'x': 2});
+      expect(Vault.formatOf(d), 'v2 (tee)');
+      await expectLater(Vault.unlock(d, '123456'), throwsStateError);
+      final again = await Vault.unlock(d, '123456', hardware: hw);
+      await again.changePin('654321');
+      expect(await (await Vault.unlock(d, '654321', hardware: hw)).load(), {'x': 2});
+      expect(Vault.formatOf(d), 'v2 (tee)');
+    });
+  });
+
   test('identity json round trip', () async {
     final i = await Identity.generate();
     final j = await Identity.load(i.toJson());
@@ -356,4 +420,19 @@ void main() {
     expect(j.node.pub.length, 32);
     expect(await Crypto.ed25519Verify(j.node.pub, [1, 2, 3], await Crypto.ed25519Sign(j.node, [1, 2, 3])), isTrue);
   });
+}
+
+/// Stands in for the Android Keystore: a key that exists only in this object.
+class FakeHardware implements HardwareKeyWrapper {
+  final Uint8List _key = randomBytes(32);
+  @override
+  String get kind => 'tee';
+  @override
+  Future<Uint8List> wrap(Uint8List data) async {
+    final n = randomBytes(12);
+    return concat([n, await Crypto.seal(_key, n, data)]);
+  }
+
+  @override
+  Future<Uint8List> unwrap(Uint8List data) => Crypto.open(_key, data.sublist(0, 12), data.sublist(12));
 }

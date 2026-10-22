@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -116,8 +118,46 @@ class _UnlockScreenState extends State<UnlockScreen> {
   final _pin = TextEditingController();
   String? _error;
   bool _busy = false;
+  DateTime? _lockedUntil;
+  Timer? _tick;
+
+  @override
+  void initState() {
+    super.initState();
+    _setLock(context.read<AppState>().lockedUntil);
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    super.dispose();
+  }
+
+  /// Wrong PINs cause escalating delays (kept across restarts by the vault).
+  void _setLock(DateTime? until) {
+    _tick?.cancel();
+    _lockedUntil = until;
+    if (until == null) return;
+    _tick = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() {
+        if (!DateTime.now().isBefore(_lockedUntil!)) {
+          _lockedUntil = null;
+          _tick?.cancel();
+        }
+      });
+    });
+  }
+
+  String? get _lockText {
+    final u = _lockedUntil;
+    if (u == null) return null;
+    final s = u.difference(DateTime.now()).inSeconds + 1;
+    return 'Too many wrong PINs. Try again in ${s >= 60 ? '${s ~/ 60} min ${s % 60} s' : '$s s'}.';
+  }
 
   Future<void> _go() async {
+    if (_lockedUntil != null) return;
     setState(() {
       _busy = true;
       _error = null;
@@ -125,10 +165,19 @@ class _UnlockScreenState extends State<UnlockScreen> {
     try {
       await context.read<AppState>().unlock(_pin.text);
     } on WrongPin {
+      if (!mounted) return;
       setState(() {
         _busy = false;
         _error = 'Wrong PIN';
         _pin.clear();
+        _setLock(context.read<AppState>().lockedUntil);
+      });
+    } on LockedOut catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = null;
+        _setLock(e.until);
       });
     } catch (e) {
       setState(() {
@@ -152,12 +201,12 @@ class _UnlockScreenState extends State<UnlockScreen> {
               controller: _pin,
               obscureText: true,
               autofocus: true,
-              decoration: InputDecoration(labelText: 'PIN or passphrase', errorText: _error),
+              decoration: InputDecoration(labelText: 'PIN or passphrase', errorText: _lockText ?? _error),
               onSubmitted: (_) => _go(),
             ),
             const SizedBox(height: 24),
             FilledButton(
-              onPressed: _busy ? null : _go,
+              onPressed: _busy || _lockedUntil != null ? null : _go,
               child: _busy
                   ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2))
                   : const Text('Unlock'),

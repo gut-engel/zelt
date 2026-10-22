@@ -252,6 +252,14 @@ class SettingsScreen extends StatelessWidget {
               }
             },
           ),
+          ListTile(
+            title: const Text('Storage protection'),
+            subtitle: Text(switch (app.vaultFormat) {
+              'v2 (strongbox)' => 'PIN + StrongBox hardware key: a copied vault cannot be opened elsewhere',
+              'v2 (tee)' => 'PIN + hardware key (TEE): a copied vault cannot be opened elsewhere',
+              _ => 'PIN only (Argon2id). No hardware key on this platform.',
+            }),
+          ),
           ListTile(title: const Text('Change PIN'), onTap: () => _changePin(context)),
           ListTile(
             title: const Text('Lock now'),
