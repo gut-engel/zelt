@@ -70,7 +70,17 @@ the counter, but still has to guess through this device's Keystore.
 
 ## Pairing
 
-Both phones show a QR code `zelt:1:<base64url>` and scan each other's:
+**One scan links both devices.** The QR code is a one-time invite (see "Invite
+texts" below, same format, valid for 10 minutes): one device shows it, the other
+scans it and sends the join request, and both end up paired. The QR's seed only
+travels optically and the join key mixes it in, so `rk0` keeps its protection
+against recorded traffic. If both scan each other at the same moment, the
+invite of the device with the lower identity key wins on both sides (the other
+device ignores the join request it received and uses its own). Leaving the
+pairing screen shortens an unused QR invite to 2 more minutes.
+
+The pairing code inside (`zelt:1:<base64url>` in v1.0.x, which both devices had
+to scan) is:
 
 ```
 idPub(32) ephPub(32) seed(32) name(str)
@@ -89,7 +99,7 @@ rk0 = HKDF(ikm = DH(id,id') ‖ DH(eph,eph') ‖ DH(id_I,eph_R) ‖ DH(eph_I,id_
            salt = id_I ‖ id_R ‖ eph_I ‖ eph_R, info = "zelt/pair/v1")
 ```
 
-The seeds only ever travel optically, so `rk0` stays secret against an observer
+With a QR invite, the shown device's seed only travels optically, so `rk0` stays secret against an observer
 who records all traffic, even one who later breaks X25519. That makes the QR code
 itself the secret: whoever photographs it gets the seed and the relay addresses.
 The pairing screen therefore sets Android's `FLAG_SECURE` (no screenshots, screen

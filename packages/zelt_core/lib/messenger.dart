@@ -460,6 +460,15 @@ class Messenger {
     return inv;
   }
 
+  /// Lets an invite expire within [grace] (never later than before).
+  void shortenInvite(String id, Duration grace) {
+    final inv = invites[id];
+    if (inv == null) return;
+    final t = DateTime.now().add(grace);
+    if (t.isBefore(inv.expiresAt)) inv.expiresAt = t;
+    _changed();
+  }
+
   void cancelInvite(String id) {
     if (invites.remove(id) == null) return;
     _inviteIds.removeWhere((_, v) => v.id == id);
@@ -552,6 +561,14 @@ class Messenger {
       theirs = PairingCode.read(r);
       if (r.remaining != 0) throw const FormatException('trailing bytes');
     } on FormatException {
+      return del;
+    }
+    // Both sides scanned each other at the same time: the invite of the
+    // lower identity key wins on both devices, so ours yields.
+    final mutual = contacts[hex(theirs.idPub)];
+    if (mutual?.pendingJoin != null && compareBytes(identity.id.pub, theirs.idPub) > 0) {
+      cancelInvite(inv.id);
+      log('both scanned at once: using ${mutual!.name}\'s code');
       return del;
     }
     // Used up: forget the invite (and save that) before pairing, so a crash

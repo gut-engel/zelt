@@ -31,7 +31,7 @@ void main() {
 Future<AppState> unlockedWithFriend(WidgetTester tester) async {
   final app = AppState();
   await tester.runAsync(() async {
-    final a = Messenger(identity: await Identity.generate(), settings: Settings(name: 'me'));
+    final a = Messenger(identity: await Identity.generate(), settings: Settings(name: 'me', port: 0));
     final b = Messenger(identity: await Identity.generate(), settings: Settings(name: 'Robin'));
     final sa = await a.newPairingSession();
     final sb = await b.newPairingSession();
@@ -78,14 +78,26 @@ void screens() {
 void pairScreen() {
   testWidgets('pair screen shows the QR code', (tester) async {
     final app = await unlockedWithFriend(tester);
+    // The QR code is an invite: it needs a mailbox, here our own relay.
+    await tester.runAsync(() => app.m.node.start(relay: true));
+    addTearDown(() => tester.runAsync(() => app.m.node.stop()));
     await tester.pumpWidget(ChangeNotifierProvider.value(value: app, child: const ZeltApp()));
     await tester.tap(find.text('Add friend'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('In person'));
-    await tester.runAsync(() => Future.delayed(const Duration(milliseconds: 500)));
     await tester.pumpAndSettle();
+    // The real screen makes its invite in the background (real crypto and
+    // network I/O, which the widget test clock does not run); check the chooser
+    // led to it, then render it with an invite made under real time.
+    expect(find.byType(PairScreen), findsOneWidget);
+    final inv = (await tester.runAsync(() => app.m.createInvite()))!;
+    await tester.pumpWidget(ChangeNotifierProvider.value(value: app, child: MaterialApp(home: PairScreen(invite: inv))));
+    await tester.pump();
     expect(find.byType(QrImageView), findsOneWidget);
     expect(tester.takeException(), isNull);
+    // Leaving the screen shortens the invite and saves (a short timer).
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(minutes: 3));
   });
 
   testWidgets('add friend offers an invite text as the second way', (tester) async {
@@ -110,9 +122,12 @@ void pairScreen() {
 void pairQrAutoHide() {
   testWidgets('pairing QR warns, hides itself after the timeout and can be shown again', (tester) async {
     final app = await unlockedWithFriend(tester);
+    await tester.runAsync(() => app.m.node.start(relay: true));
+    addTearDown(() => tester.runAsync(() => app.m.node.stop()));
+    final inv = (await tester.runAsync(() => app.m.createInvite()))!;
     await tester.pumpWidget(ChangeNotifierProvider.value(
       value: app,
-      child: const MaterialApp(home: PairScreen(qrTimeout: Duration(seconds: 2))),
+      child: MaterialApp(home: PairScreen(qrTimeout: const Duration(seconds: 2), invite: inv)),
     ));
     await tester.runAsync(() => Future.delayed(const Duration(milliseconds: 500)));
     await tester.pump();
@@ -125,5 +140,7 @@ void pairQrAutoHide() {
     expect(find.byType(QrImageView), findsOneWidget);
     await tester.pump(const Duration(seconds: 3));
     expect(find.byType(QrImageView), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(seconds: 1));
   });
 }

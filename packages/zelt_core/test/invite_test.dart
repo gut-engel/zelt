@@ -101,6 +101,24 @@ void main() {
     expect(alice.invites, isEmpty);
   });
 
+  test('both scan each other at the same moment: one link, both sides agree', () async {
+    final alice = await up('alice');
+    final bob = await up('bob');
+    final ia = await inviteFrom(alice);
+    final ib = await inviteFrom(bob);
+    await Future.wait([alice.acceptInvite(ib.text), bob.acceptInvite(ia.text)]);
+    await until(() => alice.contacts.length == 1 && bob.contacts.length == 1, 'contacts');
+    final ab = alice.contacts.values.single;
+    final ba = bob.contacts.values.single;
+    await until(() => alice.contacts.values.single.ready && bob.contacts.values.single.ready, 'handshake');
+    expect(alice.contacts.values.single.keys.rk0, bob.contacts.values.single.keys.rk0);
+    await alice.sendText(ab.id, 'one link');
+    await until(() => bob.contacts.values.single.messages.any((m) => m.text == 'one link'), 'alice -> bob');
+    await bob.sendText(ba.id, 'agreed');
+    await until(() => alice.contacts.values.single.messages.any((m) => m.text == 'agreed'), 'bob -> alice');
+    // The pairing screen cancels its own unused invite once linked.
+  });
+
   test('an invite stops working when it expires, also across a restart', () async {
     var alice = await up('alice');
     final bob = await up('bob');

@@ -5,40 +5,84 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
-import 'package:zelt_core/messenger.dart';
+import 'package:zelt_core/invite.dart';
 import 'package:zelt_core/models.dart';
 import 'package:zelt_core/pairing.dart';
 import '../app_state.dart';
 import 'scan_page.dart';
 import 'widgets.dart';
 
-/// In-person pairing: both phones show their code and scan the other's.
+/// How long the QR invite works. One scan links both devices.
+const qrInviteValidity = Duration(minutes: 10);
+
+/// After leaving the screen unused, the QR invite stays valid this long, in
+/// case the friend's scan is still on its way.
+const qrInviteGrace = Duration(minutes: 2);
+
+/// In-person pairing: one device shows its QR code, the other scans it, and
+/// both are linked. The code is a one-time invite (see invite.dart): the first
+/// scan uses it up, and it expires after [qrInviteValidity].
 class PairScreen extends StatefulWidget {
   /// How long the code stays visible before it hides itself.
   final Duration qrTimeout;
-  const PairScreen({super.key, this.qrTimeout = const Duration(seconds: 90)});
+
+  /// An invite made beforehand (tests); normally the screen makes its own.
+  final PendingInvite? invite;
+  const PairScreen({super.key, this.qrTimeout = const Duration(seconds: 90), this.invite});
 
   @override
   State<PairScreen> createState() => _PairScreenState();
 }
 
 class _PairScreenState extends State<PairScreen> {
-  PairingSession? _session;
-  Contact? _paired;
+  PendingInvite? _invite;
+  Contact? _linked;
   String? _error;
   bool _hidden = false;
+  bool _busy = false;
   Timer? _hideTimer;
+  Timer? _retry;
+  StreamSubscription<void>? _sub;
   late final AppState _app;
+  late final Map<String, Contact> _before;
 
   @override
   void initState() {
     super.initState();
     _app = context.read<AppState>();
     _app.setSecureScreen(true);
-    _app.m.newPairingSession().then((s) {
-      if (mounted) setState(() => _session = s);
-    });
+    _before = Map.of(_app.m.contacts);
+    _sub = _app.m.changes.listen((_) => _onChange());
+    _invite = widget.invite;
+    if (_invite == null) _createInvite();
     _armHide();
+  }
+
+  Future<void> _createInvite() async {
+    try {
+      final inv = await _app.m.createInvite(validity: qrInviteValidity);
+      if (!mounted) {
+        _app.m.cancelInvite(inv.id);
+        return;
+      }
+      setState(() {
+        _invite = inv;
+        _error = null;
+      });
+    } on StateError {
+      // Not connected yet: no mailbox to receive the friend's scan.
+      _retry = Timer(const Duration(seconds: 2), _createInvite);
+      if (mounted) setState(() {});
+    }
+  }
+
+  /// The friend scanned our code: their join request linked us.
+  void _onChange() {
+    if (!mounted || _linked != null) return;
+    final inv = _invite;
+    if (inv == null || _app.m.invites.containsKey(inv.id)) return;
+    final c = _app.m.contacts.values.where((c) => !identical(_before[c.id], c)).lastOrNull;
+    if (c != null) setState(() => _linked = c);
   }
 
   void _armHide() {
@@ -51,6 +95,10 @@ class _PairScreenState extends State<PairScreen> {
   @override
   void dispose() {
     _hideTimer?.cancel();
+    _retry?.cancel();
+    _sub?.cancel();
+    final inv = _invite;
+    if (inv != null) _app.m.shortenInvite(inv.id, qrInviteGrace);
     _app.setSecureScreen(false);
     super.dispose();
   }
@@ -58,14 +106,14 @@ class _PairScreenState extends State<PairScreen> {
   Future<void> _scan() async {
     final code = await push<String>(
       context,
-      const ScanPage(title: 'Scan friend\'s code', prefixes: [PairingCode.prefix]),
+      const ScanPage(title: 'Scan friend\'s code', prefixes: [InviteCode.prefix, PairingCode.prefix]),
     );
     if (code == null || !mounted) return;
     await _complete(code);
   }
 
-  /// Debug and profile builds only: lets a test harness type the friend's code over adb
-  /// instead of pointing the camera at it. Release builds pair in person only.
+  /// Desktop (no camera), and debug/profile builds for test harnesses: paste
+  /// the friend's code instead of scanning it.
   Future<void> _paste() async {
     final ctl = TextEditingController();
     final code = await showDialog<String>(
@@ -74,7 +122,7 @@ class _PairScreenState extends State<PairScreen> {
         title: Text(canScanQr ? 'Paste code (debug)' : 'Friend\'s code'),
         content: TextField(key: const Key('debugCode'), controller: ctl, autofocus: true, maxLines: 4),
         actions: [
-          FilledButton(onPressed: () => Navigator.pop(ctx, ctl.text.trim()), child: const Text('Pair')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, ctl.text.trim()), child: const Text('Link')),
         ],
       ),
     );
@@ -83,17 +131,33 @@ class _PairScreenState extends State<PairScreen> {
   }
 
   Future<void> _complete(String code) async {
+    final InviteCode parsed;
     try {
-      final parsed = PairingCode.parse(code);
-      final name = await _askName(parsed.name);
-      if (name == null || !mounted) return;
-      final c = await context.read<AppState>().m.completePairing(_session!, code, name: name);
+      if (code.trim().startsWith(PairingCode.prefix)) {
+        throw const FormatException('that device runs an older zelt; update both and try again');
+      }
+      parsed = InviteCode.parse(code);
+      if (parsed.expiredAt(DateTime.now())) throw const FormatException('that code has expired; ask for a new one');
+    } on FormatException catch (e) {
+      setState(() => _error = 'That code did not work: ${e.message}');
+      return;
+    }
+    final name = await _askName(parsed.code.name);
+    if (name == null || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      final c = await _app.m.acceptInvite(code, name: name);
+      // Linked through their code: ours is not needed any more.
+      final own = _invite;
+      if (own != null) _app.m.cancelInvite(own.id);
       setState(() {
-        _paired = c;
+        _linked = c;
         _error = null;
       });
     } catch (e) {
-      setState(() => _error = 'That code did not work: $e');
+      setState(() => _error = 'That code did not work: ${e is FormatException ? e.message : e}');
+    } finally {
+      if (mounted) setState(() => _busy = false);
     }
   }
 
@@ -119,108 +183,108 @@ class _PairScreenState extends State<PairScreen> {
   @override
   Widget build(BuildContext context) {
     final t = Theme.of(context);
-    final s = _session;
+    final inv = _invite;
+    final linked = _linked == null ? null : (_app.m.contacts[_linked!.id] ?? _linked!);
     return Scaffold(
       appBar: AppBar(title: const Text('Add friend')),
       body: SafeArea(
         child: ListView(
           padding: const EdgeInsets.all(20),
           children: [
-            Text(
-              _paired == null ? '1. Let your friend scan this code' : 'Let ${_paired!.name} scan this code too',
-              style: t.textTheme.titleMedium,
-            ),
-            const SizedBox(height: 12),
-            Center(
-              child: Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
-                child: s == null
-                    ? const SizedBox(width: 280, height: 280, child: Center(child: CircularProgressIndicator()))
-                    : _hidden
-                    ? SizedBox(
-                        width: 280,
-                        height: 280,
-                        child: Center(
-                          child: OutlinedButton.icon(
-                            key: const Key('showQrAgain'),
-                            onPressed: () {
-                              setState(() => _hidden = false);
-                              _armHide();
-                            },
-                            icon: const Icon(Icons.visibility),
-                            label: const Text('Show code again'),
-                          ),
-                        ),
-                      )
-                    : QrImageView(
-                        data: s.code,
-                        size: 280,
-                        backgroundColor: Colors.white,
-                        errorCorrectionLevel: QrErrorCorrectLevel.L,
-                      ),
-              ),
-            ),
-            const SizedBox(height: 8),
-            Card(
-              color: t.colorScheme.errorContainer,
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Row(
-                  children: [
-                    Icon(Icons.warning_amber, color: t.colorScheme.onErrorContainer),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        'This code is a secret. Anyone who photographs it gets your pairing '
-                        'secret and your relay addresses. Show it only to the friend in '
-                        'front of you. It hides itself after ${widget.qrTimeout.inSeconds} s.',
-                        style: TextStyle(color: t.colorScheme.onErrorContainer),
-                      ),
-                    ),
-                  ],
+            if (linked != null) ...[
+              Card(
+                child: ListTile(
+                  leading: Icon(linked.ready ? Icons.check_circle : Icons.hourglass_top),
+                  title: Text(linked.ready ? 'Linked with ${linked.name}' : 'Linking with ${linked.name}…'),
+                  subtitle: const Text('Compare safety numbers in their contact screen to be sure.'),
                 ),
               ),
-            ),
-            const SizedBox(height: 24),
-            Text('2. Scan their code', style: t.textTheme.titleMedium),
-            const SizedBox(height: 12),
-            if (_paired == null) ...[
+              const SizedBox(height: 16),
+              FilledButton(onPressed: () => Navigator.pop(context), child: const Text('Done')),
+            ] else ...[
+              Text('Let your friend scan this code', style: t.textTheme.titleMedium),
+              const SizedBox(height: 4),
+              Text('Only one of you needs to scan: that links both devices.', style: t.textTheme.bodySmall),
+              const SizedBox(height: 12),
+              Center(
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
+                  child: inv == null
+                      ? const SizedBox(
+                          width: 280,
+                          height: 280,
+                          child: Center(child: Text('Connecting…', style: TextStyle(color: Colors.black54))),
+                        )
+                      : _hidden
+                      ? SizedBox(
+                          width: 280,
+                          height: 280,
+                          child: Center(
+                            child: OutlinedButton.icon(
+                              key: const Key('showQrAgain'),
+                              onPressed: () {
+                                setState(() => _hidden = false);
+                                _armHide();
+                              },
+                              icon: const Icon(Icons.visibility),
+                              label: const Text('Show code again'),
+                            ),
+                          ),
+                        )
+                      : QrImageView(
+                          data: inv.text,
+                          size: 280,
+                          backgroundColor: Colors.white,
+                          errorCorrectionLevel: QrErrorCorrectLevel.L,
+                        ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Card(
+                color: t.colorScheme.errorContainer,
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Row(
+                    children: [
+                      Icon(Icons.warning_amber, color: t.colorScheme.onErrorContainer),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          'This code is a secret. Anyone who photographs it gets your pairing '
+                          'secret and your relay addresses, and could link instead of your friend. '
+                          'Show it only to the friend in front of you. It works once, hides itself '
+                          'after ${widget.qrTimeout.inSeconds} s and expires after ${qrInviteValidity.inMinutes} min.',
+                          style: TextStyle(color: t.colorScheme.onErrorContainer),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 24),
+              Text('Or scan their code', style: t.textTheme.titleMedium),
+              const SizedBox(height: 12),
               if (canScanQr)
                 FilledButton.icon(
-                  onPressed: s == null ? null : _scan,
+                  onPressed: _busy ? null : _scan,
                   icon: const Icon(Icons.qr_code_scanner),
                   label: const Text('Scan friend\'s code'),
                 )
               else
-                // Desktop has no camera scanner: type or paste the code shown
-                // on your friend's phone while you are together.
+                // Desktop has no camera scanner: the friend's phone scans this
+                // screen, or the friend's code is entered here.
                 FilledButton.icon(
-                  onPressed: s == null ? null : _paste,
+                  onPressed: _busy ? null : _paste,
                   icon: const Icon(Icons.keyboard),
                   label: const Text('Enter friend\'s code'),
                 ),
               if (canScanQr && (kDebugMode || kProfileMode))
-                TextButton(onPressed: s == null ? null : _paste, child: const Text('Paste code (debug)')),
+                TextButton(onPressed: _busy ? null : _paste, child: const Text('Paste code (debug)')),
             ],
-            if (_paired != null)
-              Card(
-                child: ListTile(
-                  leading: const Icon(Icons.check_circle),
-                  title: Text('Paired with ${_paired!.name}'),
-                  subtitle: const Text(
-                    'Keep this screen open until they have scanned your code. '
-                    'Then compare safety numbers in the contact screen.',
-                  ),
-                ),
-              ),
             if (_error != null) ...[
               const SizedBox(height: 12),
               Text(_error!, style: TextStyle(color: t.colorScheme.error)),
-            ],
-            if (_paired != null) ...[
-              const SizedBox(height: 16),
-              OutlinedButton(onPressed: () => Navigator.pop(context), child: const Text('Done')),
             ],
           ],
         ),

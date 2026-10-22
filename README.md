@@ -11,8 +11,9 @@ See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the wire format and design choices.
 
 ## Features
 
-- Pairing in person by scanning QR codes, with a safety number to compare, or
-  remotely with a one-time invite text (one use, 15 minutes).
+- Adding a friend takes one action by one person: scan their QR code in person
+  (one use, 10 minutes), or paste their one-time invite text (one use,
+  15 minutes). Both devices are linked; a safety number lets you check.
 - A hybrid X25519 + ML-KEM-768 root, then the Double Ratchet.
 - Fixed-size 8 KB Sphinx-style onion packets, with reply blocks for fetching.
 - Each message is stored on 3 relays, with dedup before decrypting, delivery

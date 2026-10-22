@@ -108,7 +108,9 @@ class JoinBlob {
 class PendingInvite {
   final Uint8List inviteId;
   final KeyPair25519 inviteKey;
-  final DateTime expiresAt;
+
+  /// Can only move earlier ([Messenger.shortenInvite]).
+  DateTime expiresAt;
 
   /// The pairing half the text carries.
   final KeyPair25519 eph;
