@@ -3,6 +3,8 @@
 //   adb reverse tcp:47100 tcp:47100 (and 47101..47103)
 //   dart run bin/zelt_peer.dart --state peer.json --control cmd.txt
 //
+// Or over Wi-Fi, without adb: --bind <this machine's LAN address>.
+//
 // Runs one messenger and three relays on 127.0.0.1, prints its pairing code,
 // and answers every incoming text with "echo: <text>". Commands are read
 // from the control file, one per line:
@@ -28,6 +30,7 @@ Future<void> main(List<String> args) async {
   var basePort = 47100;
   var localRelays = true;
   final extraPeers = <String>[];
+  InternetAddress lo = InternetAddress.loopbackIPv4;
   for (var i = 0; i < args.length; i++) {
     switch (args[i]) {
       case '--state':
@@ -41,9 +44,10 @@ Future<void> main(List<String> args) async {
         localRelays = false;
       case '--peer':
         extraPeers.add(args[++i]);
+      case '--bind':
+        lo = InternetAddress(args[++i]);
     }
   }
-  final lo = InternetAddress.loopbackIPv4;
 
   final relays = <Node>[];
   for (var i = 1; i <= (localRelays ? 3 : 0); i++) {

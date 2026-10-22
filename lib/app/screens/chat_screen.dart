@@ -134,6 +134,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   const SizedBox(width: 4),
                   IconButton.filled(
                     onPressed: _text.text.trim().isEmpty || _bytes > maxTextBytes ? null : _send,
+                    tooltip: 'Send',
                     icon: const Icon(Icons.send),
                   ),
                 ],
