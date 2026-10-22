@@ -86,8 +86,17 @@ again. Friends' apps pass it on automatically.
   The first `curl … | sh` itself trusts GitHub's TLS; check the script before
   running it if that matters to you.
 - **Commands:** use the same one-liner plus `-s -- <command>`: `configure`
-  (change settings), `update`, `status`, `share`, `logs`, `restart`, `remove`,
-  `remove --purge`.
+  (change settings), `update`, `check`, `status`, `share`, `logs`, `restart`,
+  `remove`, `remove --purge`.
+- **Manual update:** `… | sh -s -- update` installs the newest signed release
+  now. `update v1.2.3` installs exactly that (verified) release, and
+  `update --force` rebuilds even if it is already running. `check` shows the
+  installed and the newest signed release and verifies its signature, without
+  installing anything.
+- **No silent downgrades:** the installed version is recorded. If the newest
+  tag found is older (for example because newer tags were deleted from the
+  repository), auto-update and a plain `update` refuse and keep the running
+  relay. Only a named `update vX.Y.Z` goes back, with a warning.
 - **Settings** are saved in `~/.config/zelt-relay/relay.env`. For unattended
   installs, set `ZELT_YES=1` plus any of `ZELT_PORT`, `ZELT_PUBLIC_IP`,
   `ZELT_PEERS`, `ZELT_MEMORY`, `ZELT_AUTO_UPDATE`, `ZELT_UPDATE_EVERY`,

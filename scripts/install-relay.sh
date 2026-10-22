@@ -8,7 +8,11 @@
 # to ~/.config/zelt-relay/relay.env and starts the relay. More commands (same
 # one-liner, add "-s -- <command>"):
 #   configure      ask the questions again and restart with the new settings
-#   update         pull the latest code now, rebuild, restart (keeps the relay key)
+#   update [vX.Y.Z] [--force]
+#                  install the newest signed release now (or that release),
+#                  rebuild, restart (keeps the relay key); --force rebuilds even
+#                  if that version is already running
+#   check          show the installed and the newest signed release (installs nothing)
 #   status         container state, running revision, auto-update schedule
 #   share          print the share string(s) to add in the app
 #   logs           follow the relay log
@@ -45,6 +49,8 @@ SRC="$DATA_HOME/src"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/zelt-relay"
 CONF="$CONF_DIR/relay.env"
 UNIT="zelt-relay-update"
+VERSION_FILE="$DATA_HOME/version"
+WANT_TAG=""
 
 # The zelt release signing key (SSH Ed25519). Pinned here, not read from the
 # repository, so a compromised repository cannot change what is trusted.
@@ -196,8 +202,20 @@ signers_file() {
   printf '%s\n' "$DATA_HOME/allowed_signers"
 }
 
-# The tag to build: the newest vX.Y.Z, or the pinned ZELT_REF.
+valid_tag() { printf '%s\n' "$1" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; }
+
+installed_tag() { cat "$VERSION_FILE" 2>/dev/null || true; }
+
+# True if version $1 is older than $2.
+older_than() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$1" ]; }
+
+# The tag to build: one asked for on the command line, the pinned ZELT_REF, or
+# the newest vX.Y.Z.
 target_tag() {
+  if [ -n "$WANT_TAG" ]; then
+    printf '%s\n' "$WANT_TAG"
+    return
+  fi
   if [ "$ZELT_REF" != signed ]; then
     printf '%s\n' "$ZELT_REF"
     return
@@ -206,8 +224,22 @@ target_tag() {
     grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1
 }
 
+# Fetches tag $1 into the checkout (without checking it out) and verifies its
+# signature against the pinned key.
+fetch_verified_tag() {
+  if [ -d "$SRC/.git" ]; then
+    git -C "$SRC" remote set-url origin "$ZELT_REPO"
+    git -C "$SRC" fetch -q --depth 1 --force origin "refs/tags/$1:refs/tags/$1" || return 1
+  else
+    mkdir -p "$DATA_HOME"
+    git clone -q --depth 1 --no-checkout --branch "$1" "$ZELT_REPO" "$SRC" || return 1
+  fi
+  git -C "$SRC" -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=$(signers_file)" verify-tag "$1" >/dev/null 2>&1
+}
+
 fetch_source() {
   if [ "$ZELT_VERIFY" != 1 ]; then
+    if [ -n "$WANT_TAG" ]; then ZELT_REF="$WANT_TAG"; fi
     say "WARNING: signature verification is OFF (ZELT_VERIFY=0); building unverified $ZELT_REF"
     if [ -d "$SRC/.git" ]; then
       git -C "$SRC" remote set-url origin "$ZELT_REPO"
@@ -220,18 +252,17 @@ fetch_source() {
   else
     tag="$(target_tag)"
     [ -n "$tag" ] || die "no signed release (vX.Y.Z tag) found in $ZELT_REPO yet"
-    if [ -d "$SRC/.git" ]; then
-      git -C "$SRC" remote set-url origin "$ZELT_REPO"
-      git -C "$SRC" fetch -q --depth 1 --force origin "refs/tags/$tag:refs/tags/$tag"
-    else
-      mkdir -p "$DATA_HOME"
-      git clone -q --depth 1 --branch "$tag" "$ZELT_REPO" "$SRC"
+    valid_tag "$tag" || die "'$tag' is not a release tag (vX.Y.Z)"
+    cur="$(installed_tag)"
+    # Anti-rollback: only an explicit request may go back to an older release.
+    if [ -z "$WANT_TAG" ] && [ -n "$cur" ] && older_than "$tag" "$cur"; then
+      die "newest release found ($tag) is older than the installed $cur; tags may have been removed. Refusing to downgrade (to do it on purpose: update $tag)"
     fi
-    if ! git -C "$SRC" -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=$(signers_file)" verify-tag "$tag" >/dev/null 2>&1; then
-      die "release $tag is NOT signed by the pinned zelt release key; refusing to build it"
-    fi
+    fetch_verified_tag "$tag" || die "release $tag is NOT signed by the pinned zelt release key (or could not be fetched); refusing to build it"
     git -C "$SRC" checkout -q --force "refs/tags/$tag"
+    if [ -n "$cur" ] && older_than "$tag" "$cur"; then say "WARNING: downgrading from $cur to $tag, as requested"; fi
     say "verified signed release $tag"
+    BUILT_TAG="$tag"
   fi
   [ -f "$SRC/relay/Dockerfile" ] || die "relay/Dockerfile not found in $SRC"
 }
@@ -263,6 +294,12 @@ run_container() {
     -v "$VOLUME:/data" \
     "$IMAGE" >/dev/null
   say "relay running on TCP $ZELT_PORT"
+  if [ -n "${BUILT_TAG:-}" ]; then
+    mkdir -p "$DATA_HOME"
+    printf '%s\n' "$BUILT_TAG" > "$VERSION_FILE"
+  elif [ "$ZELT_VERIFY" != 1 ]; then
+    rm -f "$VERSION_FILE"
+  fi
 }
 
 show_share() {
@@ -397,12 +434,59 @@ cmd_install() {
 }
 
 cmd_update() {
+  force=0
+  for a in "$@"; do
+    case "$a" in
+      --force) force=1 ;;
+      v*) valid_tag "$a" || die "'$a' is not a release version (vX.Y.Z)"; WANT_TAG="$a" ;;
+      *) die "usage: update [vX.Y.Z] [--force]" ;;
+    esac
+  done
   need_tools
   load_config
   [ -f "$CONF" ] || die "not installed yet; run the installer first"
   fetch_source
+  if [ "$force" = 0 ] && [ "$(git -C "$SRC" rev-parse HEAD)" = "$(running_revision)" ] &&
+    docker ps -q --filter "name=^$NAME\$" | grep -q .; then
+    say "already running ${BUILT_TAG:-this revision}; nothing to do (update --force rebuilds anyway)"
+    if [ -n "${BUILT_TAG:-}" ]; then
+      mkdir -p "$DATA_HOME"
+      printf '%s\n' "$BUILT_TAG" > "$VERSION_FILE"
+    fi
+    return 0
+  fi
   build_image
   run_container
+  docker image prune -f --filter "label=org.opencontainers.image.title=zelt relay" >/dev/null 2>&1 || true
+}
+
+# Shows what an update would install, verified, without installing anything.
+cmd_check() {
+  command -v git >/dev/null 2>&1 || die "git is required"
+  load_config
+  cur="$(installed_tag)"
+  say "installed: ${cur:-unknown} (revision $(running_revision 2>/dev/null || true))"
+  if [ "$ZELT_VERIFY" != 1 ]; then
+    say "signature verification is OFF; tracking $ZELT_REF unverified"
+    return
+  fi
+  tag="$(target_tag)"
+  if [ -z "$tag" ]; then
+    say "no signed release found in $ZELT_REPO"
+    return 1
+  fi
+  if ! valid_tag "$tag" || ! fetch_verified_tag "$tag"; then
+    say "newest release: $tag (NOT signed by the pinned release key; it will not be installed)"
+    return 1
+  fi
+  say "newest signed release: $tag (signature verified)"
+  if [ -z "$cur" ] || older_than "$cur" "$tag"; then
+    say "update available: run this installer with '-s -- update'"
+  elif older_than "$tag" "$cur"; then
+    say "WARNING: the newest release found is older than the installed one; tags may have been removed"
+  else
+    say "up to date"
+  fi
 }
 
 # Scheduled: rebuild only if GitHub has a revision we are not running.
@@ -423,6 +507,7 @@ cmd_auto_update() {
   say "$(date -u +%FT%TZ) updating zelt relay to $remote"
   # fetch_source verifies the signature and stops before building if it fails.
   ( fetch_source ) || { say "update not verified; keeping the current version"; exit 0; }
+  if [ "$ZELT_VERIFY" = 1 ]; then BUILT_TAG="$tag"; fi
   build_image
   run_container
   docker image prune -f --filter "label=org.opencontainers.image.title=zelt relay" >/dev/null 2>&1 || true
@@ -432,7 +517,7 @@ cmd_status() {
   need_tools
   load_config
   docker ps --filter "name=^$NAME\$" --format '{{.Names}}: {{.Status}}' | grep . || say "not running"
-  say "revision: $(running_revision)"
+  say "version: $(installed_tag) (revision $(running_revision))"
   say "settings: $CONF"
   if have_systemd && { systemctl list-timers "$UNIT.timer" 2>/dev/null; systemctl --user list-timers "$UNIT.timer" 2>/dev/null; } | grep -q "$UNIT"; then
     say "auto-update: systemd timer $UNIT.timer"
@@ -462,14 +547,15 @@ main() {
     install) cmd_install ;;
     configure) need_tools; load_config; configure; [ -d "$SRC/.git" ] || fetch_source
                [ -n "$(running_revision)" ] || build_image; run_container; schedule_install; show_share ;;
-    update) cmd_update; show_share ;;
+    update) cmd_update "$@"; show_share ;;
+    check) cmd_check ;;
     auto-update) cmd_auto_update ;;
     restart) need_tools; load_config; run_container ;;
     status) cmd_status ;;
     share) need_tools; show_share ;;
     logs) need_tools; docker logs -f --tail 50 "$NAME" ;;
     remove) cmd_remove "$@" ;;
-    *) die "unknown command '$cmd' (install, configure, update, status, share, logs, restart, remove [--purge])" ;;
+    *) die "unknown command '$cmd' (install, configure, update [vX.Y.Z] [--force], check, status, share, logs, restart, remove [--purge])" ;;
   esac
 }
 

@@ -15,6 +15,7 @@ echo "docker \$*" >> "$T/docker.log"
 case "\$1" in
   info) exit 0 ;;
   logs) echo "  zelt-relay:203.0.113.7:47017/KEY" ;;
+  ps) echo 0123abcd ;;
   image) cat "$T/built" 2>/dev/null ;;
   build) for a in "\$@"; do case "\$a" in ZELT_REVISION=*) echo "\${a#ZELT_REVISION=}" > "$T/built" ;; esac; done ;;
 esac
@@ -81,6 +82,49 @@ printf "ZELT_PORT='47017'\nZELT_PUBLIC_IP='203.0.113.7'\nZELT_REF='main'\nZELT_R
 out=$(env -i HOME="$T/home" PATH="$T/bin:/usr/bin:/bin" ZELT_YES=1 ZELT_SCHEDULER=cron ZELT_AUTO_UPDATE=0 ZELT_SIGNERS="$T/allowed_signers" \
   sh "$ROOT/scripts/install-relay.sh" 2>&1 || true)
 check "old 'main' setting migrates to signed releases" '[[ "$out" == *"verified signed release v1.3.0"* ]]'
+
+I="$ROOT/scripts/install-relay.sh"
+rev() { git -C "$R" rev-parse "$1^{commit}"; }
+
+# 8. check: reports the verified newest release, installs nothing.
+builds=$(grep -c "docker build" "$T/docker.log")
+out=$(run sh "$I" check 2>&1 || true)
+check "check reports newest signed release, builds nothing" '[[ "$out" == *"installed: v1.3.0"* && "$out" == *"newest signed release: v1.3.0 (signature verified)"* && "$out" == *"up to date"* ]] && [ "$(grep -c "docker build" "$T/docker.log")" = "$builds" ]'
+
+# 9. update when that version already runs: nothing to rebuild.
+out=$(run sh "$I" update 2>&1 || true)
+check "update is a no-op when current" '[[ "$out" == *"already running v1.3.0"* ]] && [ "$(grep -c "docker build" "$T/docker.log")" = "$builds" ]'
+
+# 10. update --force rebuilds the same version.
+out=$(run sh "$I" update --force 2>&1 || true)
+check "update --force rebuilds" '[ "$(grep -c "docker build" "$T/docker.log")" = $((builds + 1)) ] && [ "$(cat "$T/built")" = "$(rev v1.3.0)" ]'
+
+# 11. update vX.Y.Z installs exactly that signed release (explicit downgrade, warned).
+out=$(run sh "$I" update v1.0.0 2>&1 || true)
+check "update to a named signed release (downgrade warned)" '[[ "$out" == *"downgrading from v1.3.0 to v1.0.0"* ]] && [ "$(cat "$T/built")" = "$(rev v1.0.0)" ]'
+out=$(run sh "$I" check 2>&1 || true)
+check "check offers the newer release after a downgrade" '[[ "$out" == *"update available"* ]]'
+
+# 12. update to a named but wrongly signed release is refused.
+before=$(cat "$T/built")
+out=$(run sh "$I" update v1.2.0 2>&1 || true)
+check "update to a wrongly signed release is refused" '[[ "$out" == *"NOT signed"* ]] && [ "$(cat "$T/built")" = "$before" ]'
+
+# 13. Bad arguments never reach git.
+out=$(run sh "$I" update "v1.0.0;id" 2>&1 || true)
+check "malformed version is rejected" '[[ "$out" == *"not a release version"* ]]'
+out=$(run sh "$I" update --upload-pack=x 2>&1 || true)
+check "unknown option is rejected" '[[ "$out" == *"usage: update"* ]]'
+
+# 14. Anti-rollback: removing the newest tags must not downgrade a relay.
+run sh "$I" update >/dev/null 2>&1 || true            # back on v1.3.0
+v13=$(rev v1.3.0)
+git -C "$R" tag -d v1.3.0 v1.2.0 v1.1.0 >/dev/null    # only v1.0.0 left
+before=$(cat "$T/built")
+out=$(run ZELT_AUTO_UPDATE=1 sh "$I" auto-update 2>&1 || true)
+check "auto-update refuses a rollback" '[ "$before" = "$v13" ] && [ "$(cat "$T/built")" = "$v13" ] && [[ "$out" == *"keeping the current version"* ]]'
+out=$(run sh "$I" update 2>&1 || true)
+check "update refuses a rollback without a named version" '[[ "$out" == *"Refusing to downgrade"* ]] && [ "$(cat "$T/built")" = "$before" ]'
 
 # 7. The pinned key in the installer is the real release key.
 check "installer pins the release key" 'grep -q "AAAAC3NzaC1lZDI1NTE5AAAAII4vO9juxw03g1ZPhkhqJxq5peudg73XknhfZgrnM+qi" "$ROOT/scripts/install-relay.sh"'
