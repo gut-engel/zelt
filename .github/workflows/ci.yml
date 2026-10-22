@@ -33,6 +33,8 @@ jobs:
         run: flutter analyze && flutter test
       - name: Relay installer (signature, update and rollback checks)
         run: bash scripts/test/install-relay-verify-test.sh
+      - name: Linux installer (signature, checksum, downgrade, uninstall)
+        run: bash scripts/test/install-linux-test.sh
 
   relay-image:
     runs-on: ubuntu-latest

@@ -40,6 +40,27 @@ android/         foreground service (ZeltService.kt), manifest
 test/            unit, end-to-end (several nodes on localhost) and widget tests
 ```
 
+## Install
+
+- **Android:** download `zelt-<version>-android-arm64.apk` from the
+  [latest release](https://github.com/gut-engel/zelt/releases/latest) and open it.
+- **Linux (x86_64):**
+
+  ```sh
+  curl -fsSL https://raw.githubusercontent.com/gut-engel/zelt/main/scripts/install-linux.sh | sh
+  ```
+
+  Installs into `~/.local/share/zelt-app` with an app-menu entry, an icon and a
+  `zelt` command in `~/.local/bin`. Before installing anything, it checks the
+  release manifest's Ed25519 signature against the pinned zelt update key (the
+  same key the app checks) and the tarball's SHA-256. It needs no root, and since
+  you own the install directory, zelt updates itself from signed releases.
+  Running the line again also updates; `-s -- uninstall` removes the app and
+  keeps your data, and `-s -- uninstall --purge` also deletes your data after
+  you type `delete`.
+- **Windows:** unpack `zelt-<version>-windows-x64.zip` somewhere you can write to
+  (for example your user folder) and run `zelt.exe`; it updates itself there.
+
 ## Build
 
 ```sh
