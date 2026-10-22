@@ -54,26 +54,34 @@ config in `android/app/build.gradle.kts` before distributing it.
 
 Every relay makes zelt work for more people, especially phones behind mobile
 CGNAT, which cannot accept connections. If you have a server with a public IP
-address and Docker, run:
+address, Docker and git, run:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/OWNER/zelt/main/scripts/install-relay.sh | sh
+curl -fsSL https://raw.githubusercontent.com/gut-engel/zelt/main/scripts/install-relay.sh | sh
 ```
 
-It builds the relay from this repository, starts it as an unprivileged,
-read-only container that restarts automatically, and prints a `zelt-relay:…`
-string. Share that string, or add it in the app under Settings → Network and
-peers → Add relay. Friends' apps pass it on automatically.
+The installer asks for the port, the public address(es) to advertise (it shows
+what it detected), other relays to announce to, a memory limit and whether to
+update automatically. It then builds the relay from this repository and runs it
+as an unprivileged, read-only container that restarts on its own. It prints a
+`zelt-relay:…` string: share it, or add it in the app under Settings → Network
+and peers → Add relay. Friends' apps pass it on automatically.
 
-- Open TCP port 47017 in your firewall (the script tells you how; it does not
-  change it).
-- Manage it with the same one-liner plus a command:
-  `… | sh -s -- status`, `share`, `logs`, `update`, `remove`, `remove --purge`.
-- Messages only ever pass through as fixed-size encrypted blobs, kept in RAM
-  (12 MB cap, 7 days at most). The only file is the relay's own key, in the Docker
-  volume `zelt-relay-data`.
-- Settings: `ZELT_PORT`, `ZELT_PUBLIC_IP` (if auto-detection picks the wrong
-  address, e.g. behind NAT with a port forward), `ZELT_REF`.
+- **Firewall:** open the TCP port you chose (47017 by default). The installer
+  tells you how and never changes it itself.
+- **Updates:** with auto-update on, a systemd timer (or cron) checks GitHub
+  hourly or daily and rebuilds only when a new revision exists. The updater
+  script updates along with the relay. The relay key survives updates.
+- **Commands:** use the same one-liner plus `-s -- <command>`: `configure`
+  (change settings), `update`, `status`, `share`, `logs`, `restart`, `remove`,
+  `remove --purge`.
+- **Settings** are saved in `~/.config/zelt-relay/relay.env`. For unattended
+  installs, set `ZELT_YES=1` plus any of `ZELT_PORT`, `ZELT_PUBLIC_IP`,
+  `ZELT_PEERS`, `ZELT_MEMORY`, `ZELT_AUTO_UPDATE`, `ZELT_UPDATE_EVERY`,
+  `ZELT_SCHEDULER=cron`.
+- **Privacy:** messages only ever pass through as fixed-size encrypted blobs,
+  kept in RAM (12 MB cap, 7 days at most). The only file is the relay's own key,
+  in the Docker volume `zelt-relay-data`.
 
 To do it by hand:
 
@@ -125,3 +133,8 @@ real anonymity.
 
 This is an unaudited first implementation. The threat model and the known
 limitations are in docs/PROTOCOL.md.
+
+## License
+
+[AGPL-3.0](LICENSE). If you run a modified relay or ship a modified app, publish
+your changes.
