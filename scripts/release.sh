@@ -72,8 +72,9 @@ git -c gpg.ssh.allowedSignersFile=scripts/allowed_signers verify-tag "$TAG" 2>&1
 SHA=$(git rev-parse "$TAG^{commit}")
 
 if [ "$YES" != -y ]; then
-  read -r -p "push main and $TAG ($SHA) to origin? [y/N] " a
-  [ "$a" = y ] || { git tag -d "$TAG"; die "aborted (tag removed)"; }
+  a=""
+  read -r -p "push main and $TAG ($SHA) to origin? [y/N] " a || true
+  [ "$a" = y ] || { git tag -d "$TAG"; die "aborted (tag removed); without a terminal, pass -y"; }
 fi
 git push origin main
 git push origin "$TAG"
