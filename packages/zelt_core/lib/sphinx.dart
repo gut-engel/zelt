@@ -166,10 +166,14 @@ class Peeled {
 class Sphinx {
   Sphinx._();
 
+  /// Randomness source: the system CSPRNG, or a fixed stream for test vectors.
+  /// Consumption order: 32 bytes per hop (ephemeral private keys, hop order),
+  /// then the last hop's routing padding; a SURB first takes its 8-byte ID.
   static (Uint8List, List<_HopKeys>) _header(
     List<Hop> hops,
-    Slot Function(int i, Uint8List nextEph, Uint8List nextMac) slotFor,
-  ) {
+    Slot Function(int i, Uint8List nextEph, Uint8List nextMac) slotFor, [
+    Uint8List Function(int n) rand = randomBytes,
+  ]) {
     final n = hops.length;
     if (n < 1 || n > numSlots) throw ArgumentError('1..$numSlots hops');
 
@@ -177,7 +181,7 @@ class Sphinx {
     final keys = <_HopKeys>[];
     final streams = <Uint8List>[];
     for (final h in hops) {
-      final e = KeyPair25519.generateSync();
+      final e = KeyPair25519.fromPrivateSync(rand(32));
       ephs.add(e);
       final k = _HopKeys.derive(CryptoSync.x25519(e, h.onionPk));
       keys.add(k);
@@ -197,7 +201,7 @@ class Sphinx {
     final lastLen = routingSize - (n - 1) * slotSize;
     final inner = Uint8List(lastLen)
       ..setAll(0, slotFor(n - 1, Uint8List(32), Uint8List(16)).encode())
-      ..setAll(slotSize, randomBytes(lastLen - slotSize));
+      ..setAll(slotSize, rand(lastLen - slotSize));
     xorInto(inner, Uint8List.sublistView(streams[n - 1], 0, lastLen));
     var beta = concat([inner, filler]);
     var mac = CryptoSync.hmac(keys[n - 1].mac, beta).sublist(0, 16);
@@ -218,7 +222,11 @@ class Sphinx {
   static Future<Uint8List> forward(List<Hop> hops, Uint8List payload) =>
       Worker.run(() => _forward(hops, payload));
 
-  static Uint8List _forward(List<Hop> hops, Uint8List payload) {
+  /// Deterministic forward packet for test vectors (runs inline).
+  static Uint8List forwardWith(List<Hop> hops, Uint8List payload, Uint8List Function(int n) rand) =>
+      _forward(hops, payload, rand);
+
+  static Uint8List _forward(List<Hop> hops, Uint8List payload, [Uint8List Function(int n) rand = randomBytes]) {
     if (payload.length != payloadSize) throw ArgumentError('payload size');
     final digest = CryptoSync.sha256(payload);
     final n = hops.length;
@@ -240,7 +248,7 @@ class Sphinx {
         nextMac: mac,
         extra: Uint8List(16)..[0] = next.keyId,
       );
-    });
+    }, rand);
     // Hop i decrypts one layer, so wrap the innermost (last hop) first.
     final body = Uint8List.fromList(payload);
     for (var i = n - 1; i >= 0; i--) {
@@ -254,8 +262,12 @@ class Sphinx {
   static Future<(Surb, SurbSecret)> surb(List<Hop> hops, Uint8List cookie) =>
       Worker.run(() => _surb(hops, cookie));
 
-  static (Surb, SurbSecret) _surb(List<Hop> hops, Uint8List cookie) {
-    final id = randomBytes(8);
+  /// Deterministic SURB for test vectors (runs inline).
+  static (Surb, SurbSecret) surbWith(List<Hop> hops, Uint8List cookie, Uint8List Function(int n) rand) =>
+      _surb(hops, cookie, rand);
+
+  static (Surb, SurbSecret) _surb(List<Hop> hops, Uint8List cookie, [Uint8List Function(int n) rand = randomBytes]) {
+    final id = rand(8);
     final n = hops.length;
     final (header, keys) = _header(hops, (i, eph, mac) {
       if (i == n - 1) {
@@ -275,12 +287,15 @@ class Sphinx {
         nextMac: mac,
         extra: Uint8List(16)..[0] = next.keyId,
       );
-    });
+    }, rand);
     return (
       Surb(hops.first.relay, header),
       SurbSecret(id, [for (final k in keys) k.payload]),
     );
   }
+
+  /// Deterministic reply decoding (inline), for test vectors.
+  static Uint8List openReplyWith(SurbSecret s, Uint8List payload) => _openReply(s, payload);
 
   /// Removes the layers the reply path added.
   static Future<Uint8List> openReply(SurbSecret s, Uint8List payload) =>
@@ -299,6 +314,10 @@ class Sphinx {
   /// ([keyIdOf]). Returns null if the packet is invalid or a replay. The crypto
   /// runs on the worker; the replay check stays here.
   static int keyIdOf(Uint8List packet) => packet[0];
+
+  /// Inline peel without a replay check, returning the replay tag too
+  /// (for test vectors).
+  static (Peeled, Uint8List)? peelWith(KeyPair25519 onionKey, Uint8List packet) => _peel(onionKey, packet);
 
   static Future<Peeled?> peel(
     KeyPair25519 nodeKey,

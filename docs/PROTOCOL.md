@@ -172,6 +172,19 @@ digest check and the end-to-end AEAD reject the result.
 This is *Sphinx-style*, not textbook Sphinx: per-hop ephemeral keys travel inside
 the encrypted routing info instead of being derived by blinding.
 
+### Test vectors
+
+`packages/zelt_core/test/vectors/sphinx_v2.json` pins exact bytes for a 4-hop
+forward packet (every hop's slot, replay tag and output hash) and a 3-hop SURB
+with a reply. The inputs are fixed labels: onion private keys are
+`SHA-256("onion-i")`, identities `SHA-256("identity-i")`, addresses
+192.0.2.(i+1):47017, key IDs 10, 20, 30 and 40, and delays of 100·(i+1) ms. The
+payload is ChaCha20(`SHA-256("payload")`). The builder's randomness is the
+ChaCha20 keystream for key `SHA-256("zelt sphinx v2 test vector")` with a zero
+nonce, consumed in this order: 32 bytes per hop for the ephemeral private keys
+(hop order), then the last hop's routing padding. A SURB first takes its 8-byte
+ID. `sphinx_vectors_test.dart` rebuilds everything and compares.
+
 ## Links
 
 TCP, with a server-authenticated handshake. Each side first sends a preamble,

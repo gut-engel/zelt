@@ -286,9 +286,10 @@ class KeyPair25519 {
   KeyPair25519(this.priv, this.pub);
 
   /// Fresh key pair without futures (for the crypto workers).
-  static KeyPair25519 generateSync() {
-    final priv = randomBytes(32);
-    // Public key = X25519(priv, base point 9), as in RFC 7748.
+  static KeyPair25519 generateSync() => fromPrivateSync(randomBytes(32));
+
+  /// Key pair for a given private key: public = X25519(priv, 9) (RFC 7748).
+  static KeyPair25519 fromPrivateSync(Uint8List priv) {
     final base = Uint8List(32)..[0] = 9;
     return KeyPair25519(priv, CryptoSync.x25519(KeyPair25519(priv, base), base));
   }
