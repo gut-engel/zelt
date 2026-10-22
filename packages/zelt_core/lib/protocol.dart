@@ -139,12 +139,14 @@ class HandoffCmd {
         ..bytes(blob))
       .toPadded(payloadSize);
 
-  static HandoffCmd decode(ByteReader r) => HandoffCmd(
-    r.bytes(16),
-    r.bytes(32),
-    DateTime.fromMillisecondsSinceEpoch(r.u64()),
-    r.bytes(blobSize),
-  );
+  static HandoffCmd decode(ByteReader r) {
+    final mailboxId = r.bytes(16);
+    final deleteTag = r.bytes(32);
+    final ms = r.u64();
+    // Expiry must be a sane time (the relay also caps it at its TTL).
+    if (ms < 0 || ms > DateTime(2200).millisecondsSinceEpoch) throw const FormatException('bad expiry');
+    return HandoffCmd(mailboxId, deleteTag, DateTime.fromMillisecondsSinceEpoch(ms), r.bytes(blobSize));
+  }
 }
 
 Uint8List dropCmd() =>
