@@ -16,6 +16,23 @@ This describes what the code in `lib/core/` implements. Constants live in
 
 No primitive is implemented in this repository.
 
+**About package:pqcrypto (ML-KEM-768),** as checked for v0.4.3:
+
+- It implements final FIPS 203, not the round-3 Kyber draft: `(K, r) = G(m ‖ H(ek))`
+  with no pre-hashing of `m`, implicit rejection with `J(z ‖ c)` (SHAKE256), `K`
+  used directly, and the encapsulation-key modulus check and decapsulation-key hash
+  check in place.
+- `test/mlkem_kat_test.dart` checks it against NIST ACVP vectors (key generation,
+  encapsulation, decapsulation including implicit rejection, and both key checks).
+- It is pure Dart, with no FFI and no dependencies. It is maintained (release
+  2026-10-09) but has had no independent audit.
+- It is **not fully constant-time.** Message decoding (`_msgFromPoly`) and encoding
+  (`_polyFromMsg`) branch on secret bits, and some reductions use `%` on secret
+  values (the KyberSlash class of issue). Decapsulation picks its result with a
+  branchless mask. In zelt each contact decapsulates once, on a ciphertext inside
+  the pairing-authenticated envelope, so an attacker cannot submit the many chosen
+  ciphertexts these timing attacks need. This should still be reported upstream.
+
 ## Keys
 
 Each install generates:
