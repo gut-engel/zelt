@@ -103,9 +103,11 @@ class Link {
     return (k.sublist(0, 32), k.sublist(32, 64));
   }
 
+  /// A first hop that does not answer within [timeout] is skipped and the
+  /// route rebuilt, so keep this short (delivery budget).
   static Future<Link> connect(
     RelayInfo r, {
-    Duration timeout = const Duration(seconds: 5),
+    Duration timeout = const Duration(seconds: 3),
   }) async {
     final s = await Socket.connect(r.addr.ip, r.addr.port, timeout: timeout);
     s.done.catchError((_) {}).ignore();

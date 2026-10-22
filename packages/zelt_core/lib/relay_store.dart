@@ -16,6 +16,10 @@ class StoredBlob {
   final BlobPool pool;
   final DateTime expiresAt;
 
+  /// Last time this blob went out through a watch (not re-sent to watches
+  /// for a while, so a slow delete cannot cause a resend storm).
+  DateTime? watchSentAt;
+
   StoredBlob(
     this.mailboxId,
     this.blob,
@@ -136,6 +140,8 @@ class RelayStore {
     }
     return (hits.take(max).toList(), hits.length > max);
   }
+
+  StoredBlob? byHash(Uint8List hash) => _byHash[hex(hash)];
 
   /// Early delete, authorized by the preimage of the stored delete tag.
   bool delete(Uint8List mailboxId, Uint8List hash, Uint8List deleteKey) {

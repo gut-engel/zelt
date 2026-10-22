@@ -362,7 +362,8 @@ void main() {
     expect(bob.mailboxes.values.any((m) => m.own), isFalse);
     await alice.sendText(ab.id, 'found in a later batch');
     await until(() => ba.messages.any((x) => x.text == 'found in a later batch'), 'delivery');
-    expect(bob.logLines.any((l) => l.startsWith(RegExp(r'\S+ fetched'))), isTrue);
+    // Through a watch or a poll, both of which split the IDs into batches.
+    expect(bob.logLines.any((l) => l.contains(RegExp(r'^\S+ (fetched|watch got)'))), isTrue);
   });
 
   test('relays restart with fresh onion keys and delivery continues', () async {

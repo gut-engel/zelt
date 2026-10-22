@@ -160,12 +160,15 @@ limitations are in docs/PROTOCOL.md.
   optimisation. It requests no permissions beyond those in the manifest (network,
   camera for QR codes, foreground service, notifications, installing its own
   signed updates).
-- **Mailbox polling** happens at random (Poisson) times: on average every 5 s
-  while the app is in the foreground and every 30 s in the background. The rate
-  never depends on whether mail is waiting. Messages that land on your own relay
-  are picked up at once, without waiting for a poll.
+- **Mailbox watches**: each of your mailbox relays holds a standing request with
+  a few anonymous reply paths, so a message is pushed to you the moment it is
+  stored (target: under 10 s end to end, in every delay mode). Watches are
+  renewed at random (Poisson) times, on average every 20 s in the foreground
+  and 60 s in the background, with plain polls every 30 s / 120 s as a
+  fallback. The rate never depends on whether mail is waiting. Messages that
+  land on your own relay are picked up at once.
 - **Cover traffic** (setting): off; low, with dummy packets at random times about
-  every 30 s on average; or constant, one packet every 2 s.
+  every 30 s on average; or constant, one packet every second.
 
 **What to expect from Android.** This depends on the device and is not under the
 app's control:
@@ -181,19 +184,20 @@ app's control:
 - Observed on the Blackview A52 Pro (Android 13, screen on, app in the
   background): messages arrived and showed a content-free notification.
 
-**Data use** (every link frame is 8,217 bytes; one poll is one fetch up and at
-least one reply down per mailbox relay, about 16 KB):
+**Data use** (every link frame is 8,217 bytes; a watch renewal is one packet
+up, about 8 KB; a poll is one fetch up and at least one reply down, about 16 KB;
+incoming messages add one packet each):
 
 | | per mailbox relay | typical (3 mailbox relays) |
 | --- | --- | --- |
-| Polling, foreground (5 s mean) | ~12 MB/h | ~35 MB/h |
-| Polling, background (30 s mean) | ~2 MB/h | ~6 MB/h |
+| Foreground (watch 20 s + poll 30 s mean) | ~3.5 MB/h | ~10 MB/h |
+| Background (watch 60 s + poll 120 s mean) | ~1 MB/h | ~3 MB/h |
 | Cover traffic, low | | ~1 MB/h (~24 MB/day) |
-| Cover traffic, constant | | ~15 MB/h (~350 MB/day) |
+| Cover traffic, constant | | ~30 MB/h (~710 MB/day) |
 | Relaying for others | depends on friends' traffic | |
 
-Foreground polling trades data for latency. A setting to slow it down is a
-sensible next step.
+Watches deliver faster than the old 5 s polling did, at less than a third of
+its data.
 
 ## License
 

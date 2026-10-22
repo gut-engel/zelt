@@ -24,11 +24,20 @@ class _PendingSurb {
   _PendingSurb(this.secret, this.onReply, this.expires);
 }
 
+/// A standing fetch registered by a recipient (see WatchCmd).
+class _Watch {
+  final List<Surb> surbs;
+  final DateTime expires;
+  final List<String> ids;
+  _Watch(this.surbs, this.expires, this.ids);
+}
+
 class NodeStats {
   int packetsIn = 0;
   int packetsRelayed = 0;
   int blobsStored = 0;
   int fetchesServed = 0;
+  int watchesServed = 0;
 
   /// Packets dropped: unknown or retired onion key, bad MAC, or replay.
   int packetsRejected = 0;
@@ -86,6 +95,10 @@ class Node {
 
   /// A blob was stored here (lets our own client react without polling).
   void Function(Uint8List mailboxId)? onStored;
+
+  /// Our entry relay changed or was lost: SURBs made for the old one are
+  /// useless, so watches must be renewed.
+  void Function()? onEntryChanged;
 
   /// A relay announced itself to us and passed the reachability check.
   void Function(RelayInfo relay)? onAnnounce;
@@ -146,6 +159,8 @@ class Node {
       }
       _inbound.clear();
       _clients.clear();
+      _watches.clear();
+      _watchesById.clear();
     }
   }
 
@@ -240,6 +255,7 @@ class Node {
           if (identical(l, _entryLink)) {
             _entryLink = null;
             entry = null;
+            onEntryChanged?.call();
           }
           // The relay may have restarted with new onion keys: reconnect soon
           // (jittered) so it pushes its current set. Idle closes are ours.
@@ -294,6 +310,75 @@ class Node {
   }
 
   final Set<Link> _inbound = {};
+
+  // Watches: newest last. Bounded: at most [_maxWatches] in total, the newest
+  // [_watchesPerId] per mailbox ID; expired ones are dropped by the janitor.
+  final List<_Watch> _watches = [];
+  final Map<String, List<_Watch>> _watchesById = {};
+  static const _maxWatches = 1024;
+  static const _watchesPerId = 2;
+
+  /// A blob sent through a watch is not sent through watches again for this
+  /// long (the recipient's delete is on its way); fetches still return it.
+  static const _watchResendAfter = Duration(seconds: 30);
+
+  bool _watchSendable(StoredBlob b, DateTime now) {
+    final t = b.watchSentAt;
+    return t == null || now.difference(t) > _watchResendAfter;
+  }
+
+  void _addWatch(WatchCmd c) {
+    final w = _Watch(List.of(c.surbs), DateTime.now().add(c.ttl), [for (final id in c.mailboxIds) hex(id)]);
+    _watches.add(w);
+    for (final id in w.ids) {
+      final l = _watchesById.putIfAbsent(id, () => []);
+      l.add(w);
+      while (l.length > _watchesPerId) {
+        _dropWatch(l.first);
+      }
+    }
+    while (_watches.length > _maxWatches) {
+      _dropWatch(_watches.first);
+    }
+  }
+
+  void _dropWatch(_Watch w) {
+    _watches.remove(w);
+    for (final id in w.ids) {
+      final l = _watchesById[id];
+      l?.remove(w);
+      if (l != null && l.isEmpty) _watchesById.remove(id);
+    }
+  }
+
+  /// A blob was stored under [mailboxId]: if a recipient watches it, send it
+  /// now through one of its SURBs (each SURB is used at most once).
+  int watchMisses = 0;
+
+  Future<void> _notifyWatch(Uint8List mailboxId, Uint8List blob) async {
+    final now = DateTime.now();
+    final stored = store.byHash(Crypto.sha256Sync(blob));
+    if (stored != null && !_watchSendable(stored, now)) return;
+    final l = _watchesById[hex(mailboxId)];
+    if (l == null) {
+      watchMisses++;
+      return;
+    }
+    for (final w in l.reversed.toList()) {
+      if (w.expires.isBefore(now)) {
+        _dropWatch(w);
+        continue;
+      }
+      if (w.surbs.isEmpty) continue;
+      final surb = w.surbs.removeAt(0);
+      if (w.surbs.isEmpty) _dropWatch(w);
+      stored?.watchSentAt = now;
+      stats.watchesServed++;
+      await _reply(surb, ReplyMsg(Reply.blob, last: false, mailboxId: mailboxId, blob: blob));
+      return;
+    }
+    watchMisses++;
+  }
   final Set<Link> _idleClosed = {};
   bool _stopping = false;
 
@@ -419,14 +504,15 @@ class Node {
     }
   }
 
-  /// Delays of a second or more are rounded up to whole-second batches so
-  /// packets leave in groups (paranoid mode).
+  /// Delays of 300 ms or more (paranoid mode) are rounded up to 100 ms
+  /// boundaries so packets leave in batches; delays are capped to keep
+  /// delivery within budget.
   static Duration _holdTime(int ms) {
-    final capped = min(ms, 60000);
-    if (capped < 1000) return Duration(milliseconds: capped);
+    final capped = min(ms, 2000);
+    if (capped < 300) return Duration(milliseconds: capped);
     final now = DateTime.now().millisecondsSinceEpoch;
     final due = now + capped;
-    return Duration(milliseconds: (due ~/ 1000 + 1) * 1000 - now);
+    return Duration(milliseconds: (due ~/ 100 + 1) * 100 - now);
   }
 
   Future<void> _deliver(Uint8List payload) async {
@@ -451,12 +537,27 @@ class Node {
           )) {
             stats.blobsStored++;
             onStored?.call(c.mailboxId);
+            unawaited(_notifyWatch(c.mailboxId, c.blob));
           }
         case Cmd.fetch:
           if (!_relayEnabled) return;
           stats.fetchesServed++;
           final c = FetchCmd.decode(r);
           await _serveFetch(c);
+        case Cmd.watch:
+          if (!_relayEnabled) return;
+          final c = WatchCmd.decode(r);
+          // Serve what is already waiting, keep the remaining SURBs.
+          final now = DateTime.now();
+          final (all, _) = store.fetch(c.mailboxIds, tokensPerCredential);
+          final blobs = all.where((b) => _watchSendable(b, now)).take(c.surbs.length);
+          final surbs = List.of(c.surbs);
+          for (final b in blobs) {
+            b.watchSentAt = now;
+            stats.watchesServed++;
+            await _reply(surbs.removeAt(0), ReplyMsg(Reply.blob, last: false, mailboxId: b.mailboxId, blob: b.blob));
+          }
+          if (surbs.isNotEmpty) _addWatch(WatchCmd(c.ttl, surbs, c.mailboxIds));
         case Cmd.delete:
           final c = DeleteCmd.decode(r);
           for (final e in c.entries) {
@@ -487,14 +588,16 @@ class Node {
           if (!_relayEnabled) return;
           final c = HandoffCmd.decode(r);
           final maxExp = DateTime.now().add(relayTtl);
-          store.store(
+          if (store.store(
             mailboxId: c.mailboxId,
             blob: c.blob,
             deleteTag: c.deleteTag,
             slot: 0xffff,
             pool: BlobPool.handoff,
             expiresAt: c.expiresAt.isAfter(maxExp) ? maxExp : c.expiresAt,
-          );
+          )) {
+            unawaited(_notifyWatch(c.mailboxId, c.blob));
+          }
       }
     } catch (e) {
       _log('bad command: $e');
@@ -567,6 +670,7 @@ class Node {
         await l.send(Frame(FrameType.register, _cookie));
         _entryLink = l;
         entry = c;
+        onEntryChanged?.call();
         _log('entry relay: $c');
         return c;
       } catch (_) {}
@@ -598,6 +702,9 @@ class Node {
 
   void _cleanup() {
     final now = DateTime.now();
+    for (final w in _watches.where((w) => w.expires.isBefore(now)).toList()) {
+      _dropWatch(w);
+    }
     _surbs.removeWhere((_, p) => p.expires.isBefore(now));
     store.expire();
     unawaited(keyring.maintain());

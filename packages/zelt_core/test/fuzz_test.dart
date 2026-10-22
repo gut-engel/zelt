@@ -117,6 +117,7 @@ void main() {
     final valids = <Uint8List>[
       StoreCmd(randomBytes(16), await cred.take(randomBytes(32)), randomBytes(32), randomBytes(blobSize)).encode(),
       FetchCmd([surb, surb], [randomBytes(16), randomBytes(16)]).encode(),
+      WatchCmd(const Duration(minutes: 1), [surb, surb], [randomBytes(16), randomBytes(16)]).encode(),
       DeleteCmd([DeleteEntry(randomBytes(16), randomBytes(32), randomBytes(32))]).encode(),
       HandoffCmd(randomBytes(16), randomBytes(32), DateTime.now(), randomBytes(blobSize)).encode(),
       surbCmd(Cmd.dhtFind, surb, randomBytes(32)),
@@ -132,6 +133,7 @@ void main() {
       return switch (r.u8()) {
         Cmd.store => StoreCmd.decode(r),
         Cmd.fetch => FetchCmd.decode(r),
+        Cmd.watch => WatchCmd.decode(r),
         Cmd.delete => DeleteCmd.decode(r),
         Cmd.handoff => HandoffCmd.decode(r),
         Cmd.tokenReq || Cmd.dhtFind => Surb.decode(r.bytes(Surb.encodedSize)),

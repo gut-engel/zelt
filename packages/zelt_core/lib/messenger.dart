@@ -23,11 +23,18 @@ import 'tokens.dart';
 
 /// Timing knobs. Production defaults; tests shrink them.
 class Timings {
-  /// Mean time between mailbox polls while the app is in the foreground.
+  /// Mean time between fallback mailbox polls (foreground). Delivery itself
+  /// rides on watches; polls only catch what a watch missed and check that
+  /// mailbox relays are alive.
   final Duration poll;
 
-  /// Mean time between polls in the background.
+  /// Mean time between fallback polls in the background.
   final Duration pollBackground;
+
+  /// Mean time between watch renewals (foreground / background). A watch
+  /// lives [watchLifetimeFactor] times as long, so they always overlap.
+  final Duration watch;
+  final Duration watchBackground;
   final Duration tick;
   final Duration hello;
   final Duration request;
@@ -38,20 +45,31 @@ class Timings {
   final Duration coverLowMean;
   final Duration coverConstant;
 
+  static const watchLifetimeFactor = 4;
+
   const Timings({
-    this.poll = const Duration(seconds: 5),
-    this.pollBackground = const Duration(seconds: 30),
+    this.poll = const Duration(seconds: 30),
+    this.pollBackground = const Duration(seconds: 120),
+    this.watch = const Duration(seconds: 20),
+    this.watchBackground = const Duration(seconds: 60),
     this.tick = const Duration(seconds: 5),
-    this.hello = const Duration(seconds: 45),
+    this.hello = const Duration(seconds: 20),
     this.request = const Duration(seconds: 8),
-    this.retry = const Duration(seconds: 90),
+    this.retry = const Duration(seconds: 15),
     this.discovery = const Duration(minutes: 3),
     this.update = const Duration(hours: 12),
     this.announce = const Duration(minutes: 30),
     this.coverLowMean = const Duration(seconds: 30),
-    this.coverConstant = const Duration(seconds: 2),
+    this.coverConstant = const Duration(seconds: 1),
   });
 }
+
+/// Delivery target: a message should reach the recipient within this time.
+const Duration deliveryBudget = Duration(seconds: 10);
+
+/// Mixing delay allowed on one delivery (sender path + watch reply path),
+/// leaving the rest of [deliveryBudget] for the network and processing.
+const int mixBudgetMs = 6000;
 
 /// A pairing in progress: our half of the QR exchange.
 class PairingSession {
@@ -286,6 +304,9 @@ class Messenger {
     peers.refresh(minRequired: settings.hops);
     await _refreshMailboxes();
     _schedulePoll();
+    _scheduleWatch();
+    node.onEntryChanged = _rewatchAll;
+    _rewatchAll();
     _timers.add(Timer.periodic(timings.tick, (_) => _maintenance()));
     _setupCover();
     unawaited(_maintenance());
@@ -302,6 +323,8 @@ class Messenger {
     _timers.clear();
     _coverTimer?.cancel();
     _pollTimer?.cancel();
+    _watchTimer?.cancel();
+    _rewatchSoon?.cancel();
     if (handoff) await _handoff();
     await node.stop();
     await save();
@@ -441,6 +464,7 @@ class Messenger {
       unawaited(node.ping(r));
     }
     log('paired with ${c.name} (${keys.initiator ? 'initiator' : 'responder'})');
+    _rewatchAll(); // the new contact's mailbox IDs
     await _refreshMailboxes();
     _changed();
     unawaited(_handshakeTick(c, force: true));
@@ -702,6 +726,7 @@ class Messenger {
       final changed = force || addrsChanged || before.length != after.length || !before.containsAll(after);
       if (changed) {
         log('mailbox relays: ${chosen.values.map((m) => m.relay).join(', ')}');
+        _rewatchAll();
         for (final c in contacts.values) {
           if (c.ready) {
             unawaited(_sendControl(c, MsgType.update));
@@ -799,7 +824,7 @@ class Messenger {
   Duration _retryWindow() => switch (settings.delay) {
     DelayMode.fast => timings.retry * 0.7,
     DelayMode.normal => timings.retry,
-    DelayMode.paranoid => timings.retry * 3,
+    DelayMode.paranoid => timings.retry * 1.5,
   };
 
   /// Sends up to three copies to three different mailbox relays of the
@@ -827,8 +852,7 @@ class Messenger {
     final epoch = mailboxEpochOf(now);
     var sent = 0;
     final copies = <Copy>[];
-    for (final g in grants) {
-      if (sent >= copiesPerMessage) break;
+    Future<Copy?> sendCopy(Credential g) async {
       final relay = node.isSelf(g.relay) ? g.relay : (peers.resolve(g.relay.nodePk) ?? g.relay);
       final mailboxId = await Envelope.mailboxId(c.keys.mboxOut, epoch, relay.nodePk);
       final blob = await Envelope.sealInner(c.keys.envOut, o.inner!);
@@ -836,9 +860,19 @@ class Messenger {
       final deleteTag = await Envelope.deleteTag(await Envelope.deleteKey(c.keys.delOut, hash));
       final token = await g.take(hash);
       final ok = await _sendOnion(relay, StoreCmd(mailboxId, token, deleteTag, blob).encode());
-      if (ok) {
+      return ok ? Copy(relay, mailboxId, hash) : null;
+    }
+
+    // Copies go out in parallel (a dead relay must not hold up the others);
+    // failed ones are replaced from the remaining grants.
+    var next = 0;
+    while (sent < copiesPerMessage && next < grants.length) {
+      final batch = grants.sublist(next, min(next + copiesPerMessage - sent, grants.length));
+      next += batch.length;
+      for (final cp in await Future.wait(batch.map(sendCopy))) {
+        if (cp == null) continue;
         sent++;
-        copies.add(Copy(relay, mailboxId, hash));
+        copies.add(cp);
       }
     }
     o.attempts++;
@@ -864,17 +898,25 @@ class Messenger {
     unawaited(_sendControl(c, MsgType.updateRequest));
   }
 
-  int _hopDelay() => switch (settings.delay) {
-    DelayMode.fast => _rng.nextInt(20),
-    DelayMode.normal => 100 + _rng.nextInt(401),
-    DelayMode.paranoid => 1000 + _rng.nextInt(4001),
-  };
+  /// Per-hop delay range for the current mode, capped so a whole delivery
+  /// (hops on the sender's path plus hops on the reply path) stays within
+  /// [mixBudgetMs] at any hop count.
+  (int, int) get _delayRange {
+    final (lo, hi) = switch (settings.delay) {
+      DelayMode.fast => (0, 20),
+      DelayMode.normal => (50, 250),
+      DelayMode.paranoid => (300, 900),
+    };
+    final cap = mixBudgetMs ~/ (2 * settings.hops);
+    return (min(lo, cap), min(hi, cap));
+  }
 
-  int get _maxHopDelay => switch (settings.delay) {
-    DelayMode.fast => 20,
-    DelayMode.normal => 500,
-    DelayMode.paranoid => 6000,
-  };
+  int _hopDelay() {
+    final (lo, hi) = _delayRange;
+    return lo + _rng.nextInt(hi - lo + 1);
+  }
+
+  int get _maxHopDelay => _delayRange.$2;
 
   bool _hasKey(RelayInfo r) => node.hopFor(r) != null;
 
@@ -1004,32 +1046,44 @@ class Messenger {
 
   /// Sends a command to [target] carrying [nSurbs] reply blocks and collects
   /// replies until one is marked last, all SURBs are used, or timeout.
-  Future<List<ReplyMsg>> _request(
+  /// [n] SURBs through fresh random paths ending at our entry relay, or null
+  /// if there is no usable entry. Relays on the paths are added to [used].
+  Future<List<Surb>?> _makeSurbs(
     RelayInfo target,
-    int nSurbs,
-    Uint8List Function(List<Surb> surbs) build,
-  ) async {
+    int n,
+    ReplyHandler onReply, {
+    required Duration ttl,
+    List<RelayInfo>? used,
+  }) async {
     final entryCands = peers.entryCandidates(exclude: [target.nodePk]);
     final entry = await node.ensureEntry([...entryCands, target]);
-    if (entry == null) return [];
-    final entryHop = node.hopFor(entry);
-    if (entryHop == null) return [];
-    final replies = <ReplyMsg>[];
-    final done = Completer<void>();
+    if (entry == null || node.hopFor(entry) == null) return null;
     final surbs = <Surb>[];
-    final used = <RelayInfo>[];
-    for (var i = 0; i < nSurbs; i++) {
+    for (var i = 0; i < n; i++) {
       final mids = peers.pick(settings.hops - 1, exclude: [target.nodePk, entry.nodePk], usable: _hasKey);
       final hops = [
         for (final m in mids) node.hopFor(m, delayMs: _hopDelay())!,
         node.hopFor(entry, delayMs: _hopDelay())!,
       ];
-      used.addAll(hops.map((h) => h.relay));
-      surbs.add(await node.makeSurb(hops, (r) {
-        replies.add(r);
-        if ((r.last || replies.length >= nSurbs) && !done.isCompleted) done.complete();
-      }, ttl: _requestTimeout * 2));
+      used?.addAll(hops.map((h) => h.relay));
+      surbs.add(await node.makeSurb(hops, onReply, ttl: ttl));
     }
+    return surbs;
+  }
+
+  Future<List<ReplyMsg>> _request(
+    RelayInfo target,
+    int nSurbs,
+    Uint8List Function(List<Surb> surbs) build,
+  ) async {
+    final replies = <ReplyMsg>[];
+    final done = Completer<void>();
+    final used = <RelayInfo>[];
+    final surbs = await _makeSurbs(target, nSurbs, (r) {
+      replies.add(r);
+      if ((r.last || replies.length >= nSurbs) && !done.isCompleted) done.complete();
+    }, ttl: _requestTimeout * 2, used: used);
+    if (surbs == null) return [];
     final ok = await _sendOnion(target, build(surbs), used: used);
     if (!ok) return [];
     try {
@@ -1083,6 +1137,93 @@ class Messenger {
   bool _foreground = true;
   Timer? _pollTimer;
 
+  // --- Watches: standing fetches at our mailbox relays -------------------
+
+  Timer? _watchTimer;
+  Timer? _rewatchSoon;
+  final Set<String> _watching = {};
+  final Map<String, int> _watchSurbsLeft = {};
+
+  Duration get _watchMean => _foreground ? timings.watch : timings.watchBackground;
+
+  Duration get _watchTtl {
+    final t = _watchMean * Timings.watchLifetimeFactor;
+    return t > maxWatchTtl ? maxWatchTtl : t;
+  }
+
+  /// Renews all watches at random (Poisson) times; gaps are capped well below
+  /// a watch's lifetime, so watches always overlap. The rate never depends
+  /// on whether mail is waiting.
+  void _scheduleWatch() {
+    _watchTimer?.cancel();
+    if (!_started) return;
+    final mean = _watchMean.inMilliseconds;
+    final ms = (-math.log(1 - _rng.nextDouble()) * mean).round().clamp(mean ~/ 4, mean * 2);
+    _watchTimer = Timer(Duration(milliseconds: ms), () {
+      unawaited(_renewWatches());
+      _scheduleWatch();
+    });
+  }
+
+  /// Renews soon (debounced): after an entry change, new mailboxes or contacts.
+  void _rewatchAll() {
+    _rewatchSoon?.cancel();
+    _rewatchSoon = Timer(const Duration(milliseconds: 300), () => unawaited(_renewWatches()));
+  }
+
+  Future<void> _renewWatches() async {
+    if (!_started || contacts.isEmpty) return;
+    for (final rec in _currentMailboxes()) {
+      if (rec.own || node.isSelf(rec.relay)) continue; // own relay: instant path
+      unawaited(_watchRelay(rec));
+    }
+  }
+
+  Future<void> _watchRelay(MailboxRecord rec) async {
+    final k = rec.relay.id;
+    if (!_watching.add(k)) return;
+    try {
+      final ttl = _watchTtl;
+      final (ids, idMap) = await _idsFor(rec.relay.nodePk, DateTime.now());
+      if (ids.isEmpty) return;
+      var total = 0;
+      for (final chunk in fetchBatches(ids)) {
+        final surbs = await _makeSurbs(
+          rec.relay,
+          fetchSurbs,
+          (r) => _onWatchReply(rec, r, idMap),
+          ttl: ttl + _requestTimeout,
+        );
+        if (surbs == null) return;
+        if (await _sendOnion(rec.relay, WatchCmd(ttl, surbs, chunk).encode())) total += surbs.length;
+      }
+      _watchSurbsLeft[k] = total;
+    } catch (e) {
+      log('watch ${rec.relay.addr} failed: $e');
+    } finally {
+      _watching.remove(k);
+    }
+  }
+
+  void _onWatchReply(MailboxRecord rec, ReplyMsg r, Map<String, Contact> idMap) {
+    final k = rec.relay.id;
+    if (r.partners.isNotEmpty) rec.partners = r.partners;
+    rec.failures = 0;
+    final left = (_watchSurbsLeft[k] ?? 1) - 1;
+    _watchSurbsLeft[k] = left;
+    // Replenish before the watch runs dry (jittered).
+    if (left <= 1) {
+      Timer(Duration(milliseconds: 200 + _rng.nextInt(1000)), () => unawaited(_watchRelay(rec)));
+    }
+    if (r.type != Reply.blob) return;
+    unawaited(() async {
+      final del = await _receive(r.blob!, r.mailboxId!, idMap);
+      if (del == null) return;
+      log('watch got 1 from ${rec.relay.addr}');
+      await _sendOnion(rec.relay, DeleteCmd([del]).encode());
+    }());
+  }
+
   /// Foreground polls more often. The rate never depends on whether mail is
   /// waiting, so it reveals nothing about messages.
   void setForeground(bool fg) {
@@ -1090,6 +1231,9 @@ class Messenger {
     _foreground = fg;
     if (fg) unawaited(pollNow());
     _schedulePoll();
+    // Watch lifetimes depend on the mode: renew now with the new one.
+    _rewatchAll();
+    _scheduleWatch();
   }
 
   /// Exponentially distributed gaps (a Poisson process): no fixed schedule an

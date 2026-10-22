@@ -325,15 +325,25 @@ restart, crash or kill loses everything else, by design:
    ID over its own fresh onion path. Middle hops are random active peers with a
    valid onion key, chosen anew for every packet. If the first hop does not
    answer, it rebuilds the route.
-3. The recipient fetches from every mailbox relay it advertised within the TTL.
-   One fetch packet carries 4 SURBs and at most 221 mailbox IDs (24 contacts at
-   9 IDs each). Longer lists are split over several fetch packets.
+3. The recipient keeps a **watch** on every mailbox relay it advertised within
+   the TTL: a standing fetch (`watch`, command 0x08) that carries 4 SURBs, a
+   lifetime (at most 5 min) and at most 221 mailbox IDs (24 contacts at 9 IDs
+   each; longer lists are split). The relay first answers with what is already
+   waiting, then keeps the unused SURBs. When a blob is stored under a watched ID,
+   it goes out at once through one of them, each SURB used at most once. A blob
+   sent through a watch is not sent through watches again for 30 s, so a slow
+   delete cannot cause a resend storm. A relay holds at most 1024 watches, at
+   most 2 per mailbox ID (newest win), and forgets them all when relaying is
+   switched off. Watches are renewed at random (Poisson) times, on average every
+   20 s in the foreground and 60 s in the background, and live 4 times that, so
+   they always overlap. A new one is also sent when SURBs run low. Plain fetches
+   (4 SURBs per packet) still run every 30 s / 120 s on average as a fallback.
    It opens the envelope, hashes the inner content and checks the seen set (kept
    for the TTL plus a day) *before* the ratchet runs. Copies 2 and 3 end there.
    It then deletes the copy on that relay.
 4. Receipts are ordinary ratchet messages. When one arrives, the sender asks all
    copy holders to delete.
-5. Without a receipt after the retry window (about 1 min / 1.5 min / 4.5 min for
+5. Without a receipt after the retry window (about 10 s / 15 s / 22 s for
    fast, normal and paranoid), it re-seals the same inner content for a new set
    of relays, with exponential backoff. Duplicates are caught by the seen set, and then by
    the ratchet counter.
@@ -364,17 +374,23 @@ the querier's IP.
 
 ## Delay and cover traffic
 
-| Mode | Per-hop delay |
-| --- | --- |
-| Fast | 0–20 ms |
-| Normal | 100–500 ms |
-| Paranoid | 1–5 s, released on whole-second batch boundaries |
+**Delivery budget: 10 s.** Every message must reach a watching recipient within
+10 s. 6 s of that is the mixing budget: per-hop delays are capped at
+`6000 / (2 × hops)` ms, so the sender's path plus the watch's reply path stay
+within it at any hop count. The rest is left for the network and processing.
+Relays cap any requested delay at 2 s.
+
+| Mode | Per-hop delay | Measured (in-process test, 8 relays) |
+| --- | --- | --- |
+| Fast | 0–20 ms | under 0.1 s (3 hops) |
+| Normal | 50–250 ms | 0.5–0.9 s (4 hops) |
+| Paranoid | 300–900 ms (7 hops: up to 428 ms), rounded up to 100 ms boundaries so packets leave in batches | 1.8–3.2 s (4 and 7 hops) |
 
 Cover traffic options:
 
 - **Off:** no dummy packets.
 - **Low:** dummy `drop` packets at exponentially distributed gaps, with a 30 s mean.
-- **Constant:** one packet every 2 s. A queued real packet goes out if there is
+- **Constant:** one packet every second. A queued real packet goes out if there is
   one, otherwise a dummy.
 
 ## Answers to the open design questions (v1)
@@ -403,6 +419,14 @@ Cover traffic options:
   tell who that recipient is. IDs rotate daily, and copies on other relays use
   unrelated IDs and bytes. Relays can still correlate copies by timing.
 - A relay learns which of its operator's contacts' slots a token came from.
+- **The 10 s delivery budget limits mixing.** Per-hop delays are at most a few
+  hundred milliseconds, which hides less than delays of seconds or minutes
+  would. An observer of many links who sees a packet enter and another leave
+  shortly after can link them more easily. Cover traffic (constant) helps; there
+  is no mode that trades the 10 s target for stronger mixing.
+- A mailbox relay sees when a watch is renewed. Renewals happen at random
+  times, but a fresh watch also follows soon after its SURBs are used up, so a
+  relay that served the blobs (and knows that already) sees the renewal too.
 - A relay restart forgets its spent-token sets (see "What a relay restart
   loses").
 - **The onion and link layers are X25519-only, not post-quantum.** Onion-key

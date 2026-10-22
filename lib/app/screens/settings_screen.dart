@@ -121,8 +121,10 @@ class SettingsScreen extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Text(switch (s.delay) {
               DelayMode.fast => 'Minimal per-hop delay. Easiest to correlate by timing.',
-              DelayMode.normal => '100–500 ms random delay per hop, about 1–2 s extra at 4 hops.',
-              DelayMode.paranoid => 'Seconds per hop, released in batches. Strongest timing protection.',
+              DelayMode.normal => '50–250 ms random delay per hop. Messages arrive in about 1 s.',
+              DelayMode.paranoid =>
+                'Up to 900 ms per hop, released in batches. Strongest timing protection; '
+                'messages still arrive within 10 s.',
             }, style: t.textTheme.bodySmall),
           ),
           const SizedBox(height: 16),
@@ -150,8 +152,8 @@ class SettingsScreen extends StatelessWidget {
               CoverMode.off => 'No dummy packets. Saves battery and data; reveals when you send.',
               CoverMode.low => 'Dummy packets at random times, about 25 MB a day.',
               CoverMode.constant =>
-                'One packet every 2 s, real or dummy, so sending looks like idling. '
-                'About 350 MB a day: use on Wi-Fi.',
+                'One packet every second, real or dummy, so sending looks like idling. '
+                'About 700 MB a day: use on Wi-Fi.',
             }, style: t.textTheme.bodySmall),
           ),
           _Header('Relay'),

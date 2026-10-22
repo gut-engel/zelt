@@ -17,6 +17,7 @@ abstract class Cmd {
   static const tokenReq = 0x05;
   static const dhtFind = 0x06;
   static const handoff = 0x07;
+  static const watch = 0x08;
 }
 
 abstract class Reply {
@@ -30,6 +31,46 @@ abstract class Reply {
 const int fetchSurbs = 4;
 const int fetchMaxIds =
     (payloadSize - 1 - 1 - fetchSurbs * Surb.encodedSize - 2) ~/ 16;
+
+/// Longest a relay keeps a watch.
+const Duration maxWatchTtl = Duration(minutes: 5);
+
+/// A standing fetch: the relay keeps the SURBs (each usable once) and sends
+/// a blob for any of [mailboxIds] through one of them as soon as it arrives.
+/// Blobs already waiting are sent right away. This is what keeps delivery
+/// under ten seconds without polling every few seconds.
+class WatchCmd {
+  final Duration ttl;
+  final List<Surb> surbs;
+  final List<Uint8List> mailboxIds;
+  WatchCmd(this.ttl, this.surbs, this.mailboxIds);
+
+  Uint8List encode() {
+    final w = ByteWriter()
+      ..u8(Cmd.watch)
+      ..u16(ttl.inSeconds)
+      ..u8(surbs.length);
+    for (final s in surbs) {
+      w.bytes(s.encode());
+    }
+    w.u16(mailboxIds.length);
+    for (final id in mailboxIds) {
+      w.bytes(id);
+    }
+    return w.toPadded(payloadSize);
+  }
+
+  static WatchCmd decode(ByteReader r) {
+    final ttl = Duration(seconds: r.u16());
+    if (ttl > maxWatchTtl || ttl == Duration.zero) throw const FormatException('bad watch ttl');
+    final n = r.u8();
+    if (n == 0 || n > fetchSurbs) throw const FormatException('bad watch surb count');
+    final surbs = [for (var i = 0; i < n; i++) Surb.decode(r.bytes(Surb.encodedSize))];
+    final m = r.u16();
+    if (m > fetchMaxIds) throw const FormatException('too many watch ids');
+    return WatchCmd(ttl, surbs, [for (var i = 0; i < m; i++) r.bytes(16)]);
+  }
+}
 
 /// Splits mailbox IDs into fetch-sized batches, one fetch packet each.
 List<List<Uint8List>> fetchBatches(List<Uint8List> ids) => [
