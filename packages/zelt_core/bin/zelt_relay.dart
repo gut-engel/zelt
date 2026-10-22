@@ -80,7 +80,13 @@ Future<void> main(List<String> args) async {
       stdout.writeln('Upgraded to protocol v$protocolVersion: this relay has a new identity and share string.');
     }
     f.writeAsStringSync(jsonEncode({'identity': identity.toJson(), 'secret': b64(secret)}));
-    await Process.run('chmod', ['600', f.path]);
+    // The container image has no chmod binary; there /data itself is 0700
+    // and owned by the relay user, which protects the key.
+    try {
+      await Process.run('chmod', ['600', f.path]);
+    } on ProcessException {
+      // No chmod available: rely on the directory permissions.
+    }
   }
 
   final node = Node(identity: identity, relaySecret: unb64(b64(secret)), port: port);

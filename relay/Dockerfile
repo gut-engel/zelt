@@ -22,7 +22,8 @@ COPY packages/zelt_core/ ./
 RUN dart pub get --offline \
  && dart compile exe bin/zelt_relay.dart -o /zelt_relay \
  && mkdir -p /data-skel \
- && chown 65532:65532 /data-skel
+ && chown 65532:65532 /data-skel \
+ && chmod 700 /data-skel
 
 # Minimal runtime: only the libraries a compiled Dart binary needs.
 FROM scratch
