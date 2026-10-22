@@ -5,6 +5,7 @@
 //   zelt_sign manifest <keyfile> <dir> <version> <build> [notes]
 //       hashes every release file in <dir>, writes zelt-update.json and signs it
 //   zelt_sign verify <pubkey> <dir>             check the manifest and all files
+//   zelt_sign verify-manifest <pubkey> <file>   check only a manifest (+ .sig); prints its build
 //
 // The key file never belongs in a repository; the Makefile keeps it in
 // ~/.config/zelt-signing/ with mode 600.
@@ -70,13 +71,19 @@ Future<void> main(List<String> a) async {
         await UpdateManifest.checkFile(e, File('$dir/${e.file}').readAsBytesSync());
       }
       stdout.writeln('OK: ${m.version} (build ${m.build}), ${m.assets.length} assets verified');
+    case 'verify-manifest':
+      if (a.length != 3) _usage();
+      final bytes = File(a[2]).readAsBytesSync();
+      final m = await UpdateManifest.verify(bytes, File('${a[2]}.sig').readAsStringSync(), a[1]);
+      stdout.writeln('version ${m.version}');
+      stdout.writeln('build ${m.build}');
     default:
       _usage();
   }
 }
 
 Never _usage() {
-  stderr.writeln('usage: zelt_sign keygen|pubkey|manifest|verify ... (see source)');
+  stderr.writeln('usage: zelt_sign keygen|pubkey|manifest|verify|verify-manifest ... (see source)');
   exit(64);
 }
 

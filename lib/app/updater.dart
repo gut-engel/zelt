@@ -105,7 +105,10 @@ class Updater {
   }) async {
     final bytes = await _get('$baseUrl/${u.asset.file}', _maxAsset, progress);
     await UpdateManifest.checkFile(u.asset, bytes);
-    final tmp = await getTemporaryDirectory();
+    // A fresh private directory (mkdtemp, mode 0700): in a shared /tmp another
+    // local user could otherwise plant or swap the verified file, the staging
+    // directory or the helper script before they are used.
+    final tmp = await (await getTemporaryDirectory()).createTemp('zelt-update-');
     final file = File('${tmp.path}/${u.asset.file}');
     await file.writeAsBytes(bytes, flush: true);
 
@@ -149,10 +152,11 @@ class Updater {
     if (r.exitCode != 0) throw UpdateRejected('could not unpack: ${r.stderr}');
     if (!await File('${stage.path}/zelt').exists()) throw const UpdateRejected('archive has no zelt binary');
     final script = File('${tmp.path}/zelt-update.sh');
+    String q(String s) => "'${s.replaceAll("'", "'\\''")}'";
     await script.writeAsString('''#!/bin/sh
 while kill -0 $pid 2>/dev/null; do sleep 0.3; done
-cp -a "${stage.path}/." "${appDir.path}/" && rm -rf "${stage.path}" "${archive.path}"
-exec "${appDir.path}/zelt" >/dev/null 2>&1
+cp -a ${q('${stage.path}/.')} ${q('${appDir.path}/')} && rm -rf ${q(tmp.path)}
+exec ${q('${appDir.path}/zelt')} >/dev/null 2>&1
 ''');
     await Process.start('/bin/sh', [script.path], mode: ProcessStartMode.detached);
   }
@@ -167,7 +171,7 @@ Wait-Process -Id $pid -ErrorAction SilentlyContinue
 if (Test-Path ${q(stage)}) { Remove-Item -Recurse -Force ${q(stage)} }
 Expand-Archive -Path ${q(archive.path)} -DestinationPath ${q(stage)} -Force
 Copy-Item -Path (Join-Path ${q(stage)} '*') -Destination ${q(appDir.path)} -Recurse -Force
-Remove-Item -Recurse -Force ${q(stage)}, ${q(archive.path)}
+Remove-Item -Recurse -Force ${q(tmp.path)}
 Start-Process -FilePath (Join-Path ${q(appDir.path)} 'zelt.exe')
 ''');
     await Process.start(
