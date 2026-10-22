@@ -1,7 +1,7 @@
 # zelt protocol, v1
 
-This describes what the code in `lib/core/` implements. Constants live in
-`lib/core/constants.dart`; changing any of them breaks wire compatibility.
+This describes what the code in `packages/zelt_core/lib/` implements. Constants live in
+`packages/zelt_core/lib/constants.dart`; changing any of them breaks wire compatibility.
 
 ## Primitives
 
@@ -266,7 +266,7 @@ Cover traffic options:
    out automatically when your addresses or reachable relays change.
 4. **Remote pairing:** not in v1. Pairing is in person only.
 5. **Scope:** 1:1 text, up to 6000 bytes per message. No groups or files.
-6. **Platform:** Android, Flutter. A headless relay runs on any Dart VM
+6. **Platform:** Flutter for Android, with Linux and Windows builds. A headless relay runs on any Dart VM
    (`packages/zelt_core/bin/zelt_relay.dart`).
 7. **Name:** zelt, its own project.
 

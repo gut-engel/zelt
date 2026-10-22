@@ -4,7 +4,7 @@ A messenger with no servers, no accounts and no directory. Every phone can also
 be a relay for its friends. Messages travel through 3–7 onion-encrypted hops
 (4 by default), wait in relay RAM, and only the recipient can read them.
 
-Android only, built with Flutter. The protocol core (`lib/core/`) is pure Dart
+Built with Flutter for Android, Linux and Windows. The protocol core (`packages/zelt_core/lib/`) is pure Dart
 with no Flutter imports, so the same code also runs a headless always-on relay.
 
 See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the wire format and design choices.
