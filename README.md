@@ -71,8 +71,18 @@ and peers → Add relay. Friends' apps pass it on automatically.
 - **Firewall:** open the TCP port you chose (47017 by default). The installer
   tells you how and never changes it itself.
 - **Updates:** with auto-update on, a systemd timer (or cron) checks GitHub
-  hourly or daily and rebuilds only when a new revision exists. The updater
-  script updates along with the relay. The relay key survives updates.
+  hourly or daily. Relays **only build signed releases**: the newest `vX.Y.Z`
+  tag whose SSH signature verifies against the release key pinned in the
+  installer (`git verify-tag`). An unsigned or wrongly signed tag is refused, and
+  the running version stays. The updater script updates along with the relay,
+  and the relay key survives updates. `ZELT_REF=vX.Y.Z` pins a release (still
+  verified). Opt out, e.g. for a fork or development, with `ZELT_VERIFY=0
+  ZELT_REF=main` (builds unverified code; not recommended), or pin your own key
+  with `ZELT_SIGNERS=/path/to/allowed_signers`.
+- **Verifying by hand:** `scripts/allowed_signers` holds the same public key:
+  `git -c gpg.ssh.allowedSignersFile=scripts/allowed_signers verify-tag vX.Y.Z`.
+  The first `curl … | sh` itself trusts GitHub's TLS; check the script before
+  running it if that matters to you.
 - **Commands:** use the same one-liner plus `-s -- <command>`: `configure`
   (change settings), `update`, `status`, `share`, `logs`, `restart`, `remove`,
   `remove --purge`.

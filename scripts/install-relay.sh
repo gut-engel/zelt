@@ -21,6 +21,13 @@
 #   ZELT_UPDATE_EVERY (hourly/daily), ZELT_REPO, ZELT_REF
 # as environment variables. ZELT_SCHEDULER=cron uses cron instead of systemd.
 #
+# Signed releases only: by default the relay is built from the newest release
+# tag vX.Y.Z whose SSH signature verifies against the zelt release key pinned
+# below (git verify-tag). ZELT_REF=vX.Y.Z pins a specific (still verified)
+# tag. Opting out, e.g. for a fork or development, builds an unverified branch:
+#   ZELT_VERIFY=0 ZELT_REF=main ...      (not recommended)
+# A fork can pin its own key with ZELT_SIGNERS=/path/to/allowed_signers.
+#
 # What it does: clones the source into ~/.local/share/zelt-relay/src, builds the
 # image from relay/Dockerfile, and runs it as an unprivileged, read-only
 # container with host networking (IPv4 and IPv6). Message blobs stay in RAM; only
@@ -38,6 +45,10 @@ SRC="$DATA_HOME/src"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/zelt-relay"
 CONF="$CONF_DIR/relay.env"
 UNIT="zelt-relay-update"
+
+# The zelt release signing key (SSH Ed25519). Pinned here, not read from the
+# repository, so a compromised repository cannot change what is trusted.
+ALLOWED_SIGNERS='zelt-release namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII4vO9juxw03g1ZPhkhqJxq5peudg73XknhfZgrnM+qi zelt-release'
 CRON_TAG="# zelt-relay-update"
 
 say() { printf '%s\n' "$*"; }
@@ -49,7 +60,7 @@ load_config() {
   # Saved settings first, then the environment wins.
   _env_port="${ZELT_PORT:-}"; _env_ip="${ZELT_PUBLIC_IP:-}"; _env_peers="${ZELT_PEERS:-}"
   _env_mem="${ZELT_MEMORY:-}"; _env_au="${ZELT_AUTO_UPDATE:-}"; _env_every="${ZELT_UPDATE_EVERY:-}"
-  _env_repo="${ZELT_REPO:-}"; _env_ref="${ZELT_REF:-}"
+  _env_repo="${ZELT_REPO:-}"; _env_ref="${ZELT_REF:-}"; _env_verify="${ZELT_VERIFY:-}"
   # shellcheck disable=SC1090
   [ -f "$CONF" ] && . "$CONF"
   ZELT_PORT="${_env_port:-${ZELT_PORT:-47017}}"
@@ -59,7 +70,11 @@ load_config() {
   ZELT_AUTO_UPDATE="${_env_au:-${ZELT_AUTO_UPDATE:-1}}"
   ZELT_UPDATE_EVERY="${_env_every:-${ZELT_UPDATE_EVERY:-hourly}}"
   ZELT_REPO="${_env_repo:-${ZELT_REPO:-https://github.com/gut-engel/zelt.git}}"
-  ZELT_REF="${_env_ref:-${ZELT_REF:-main}}"
+  # Settings saved before signed releases existed tracked "main" by default;
+  # that now means "newest signed release".
+  if [ -z "$_env_ref" ] && [ -z "${ZELT_VERIFY:-}" ] && [ "${ZELT_REF:-}" = main ]; then ZELT_REF=signed; fi
+  ZELT_REF="${_env_ref:-${ZELT_REF:-signed}}"
+  ZELT_VERIFY="${_env_verify:-${ZELT_VERIFY:-1}}"
 }
 
 q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
@@ -77,6 +92,7 @@ save_config() {
     say "ZELT_UPDATE_EVERY=$(q "$ZELT_UPDATE_EVERY")"
     say "ZELT_REPO=$(q "$ZELT_REPO")"
     say "ZELT_REF=$(q "$ZELT_REF")"
+    say "ZELT_VERIFY=$(q "$ZELT_VERIFY")"
   } > "$CONF"
 }
 
@@ -136,7 +152,7 @@ configure() {
     fi
     say "" > /dev/tty
     say "  port: $ZELT_PORT   public: ${ZELT_PUBLIC_IP:-none}   memory: $ZELT_MEMORY" > /dev/tty
-    [ "$ZELT_AUTO_UPDATE" = 1 ] && say "  auto-update: $ZELT_UPDATE_EVERY from $ZELT_REPO ($ZELT_REF)" > /dev/tty \
+    [ "$ZELT_AUTO_UPDATE" = 1 ] && say "  auto-update: $ZELT_UPDATE_EVERY, signed releases from $ZELT_REPO" > /dev/tty \
       || say "  auto-update: off" > /dev/tty
     _ok=1
     ask_yn _ok "Continue"
@@ -165,16 +181,57 @@ need_tools() {
   command -v docker >/dev/null 2>&1 || die "Docker is not installed. See https://docs.docker.com/engine/install/"
   docker info >/dev/null 2>&1 || die "cannot talk to Docker. Run with sudo, or add your user to the 'docker' group."
   command -v git >/dev/null 2>&1 || die "git is not installed (needed to fetch and update the source)."
+  if [ "${ZELT_VERIFY:-1}" = 1 ]; then
+    command -v ssh-keygen >/dev/null 2>&1 || die "ssh-keygen is needed to verify release signatures (install openssh-client)."
+  fi
+}
+
+signers_file() {
+  if [ -n "${ZELT_SIGNERS:-}" ]; then
+    printf '%s\n' "$ZELT_SIGNERS"
+    return
+  fi
+  mkdir -p "$DATA_HOME"
+  printf '%s\n' "$ALLOWED_SIGNERS" > "$DATA_HOME/allowed_signers"
+  printf '%s\n' "$DATA_HOME/allowed_signers"
+}
+
+# The tag to build: the newest vX.Y.Z, or the pinned ZELT_REF.
+target_tag() {
+  if [ "$ZELT_REF" != signed ]; then
+    printf '%s\n' "$ZELT_REF"
+    return
+  fi
+  git ls-remote --tags --refs "$ZELT_REPO" 'v*' 2>/dev/null | awk '{print $2}' | sed 's#refs/tags/##' |
+    grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1
 }
 
 fetch_source() {
-  if [ -d "$SRC/.git" ]; then
-    git -C "$SRC" remote set-url origin "$ZELT_REPO"
-    git -C "$SRC" fetch -q --depth 1 origin "$ZELT_REF"
-    git -C "$SRC" checkout -q --force FETCH_HEAD
+  if [ "$ZELT_VERIFY" != 1 ]; then
+    say "WARNING: signature verification is OFF (ZELT_VERIFY=0); building unverified $ZELT_REF"
+    if [ -d "$SRC/.git" ]; then
+      git -C "$SRC" remote set-url origin "$ZELT_REPO"
+      git -C "$SRC" fetch -q --depth 1 origin "$ZELT_REF"
+      git -C "$SRC" checkout -q --force FETCH_HEAD
+    else
+      mkdir -p "$DATA_HOME"
+      git clone -q --depth 1 --branch "$ZELT_REF" "$ZELT_REPO" "$SRC"
+    fi
   else
-    mkdir -p "$DATA_HOME"
-    git clone -q --depth 1 --branch "$ZELT_REF" "$ZELT_REPO" "$SRC"
+    tag="$(target_tag)"
+    [ -n "$tag" ] || die "no signed release (vX.Y.Z tag) found in $ZELT_REPO yet"
+    if [ -d "$SRC/.git" ]; then
+      git -C "$SRC" remote set-url origin "$ZELT_REPO"
+      git -C "$SRC" fetch -q --depth 1 --force origin "refs/tags/$tag:refs/tags/$tag"
+    else
+      mkdir -p "$DATA_HOME"
+      git clone -q --depth 1 --branch "$tag" "$ZELT_REPO" "$SRC"
+    fi
+    if ! git -C "$SRC" -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=$(signers_file)" verify-tag "$tag" >/dev/null 2>&1; then
+      die "release $tag is NOT signed by the pinned zelt release key; refusing to build it"
+    fi
+    git -C "$SRC" checkout -q --force "refs/tags/$tag"
+    say "verified signed release $tag"
   fi
   [ -f "$SRC/relay/Dockerfile" ] || die "relay/Dockerfile not found in $SRC"
 }
@@ -348,11 +405,19 @@ cmd_auto_update() {
   need_tools
   load_config
   [ "$ZELT_AUTO_UPDATE" = 1 ] || exit 0
-  remote="$(git ls-remote "$ZELT_REPO" "refs/heads/$ZELT_REF" "refs/tags/$ZELT_REF" 2>/dev/null | head -n1 | cut -f1)"
+  if [ "$ZELT_VERIFY" = 1 ]; then
+    tag="$(target_tag)"
+    [ -n "$tag" ] || { say "no signed release found; keeping the current version"; exit 0; }
+    # Commit the tag points to (peeled), compared with the running image.
+    remote="$(git ls-remote "$ZELT_REPO" "refs/tags/$tag^{}" "refs/tags/$tag" 2>/dev/null | head -n1 | cut -f1)"
+  else
+    remote="$(git ls-remote "$ZELT_REPO" "refs/heads/$ZELT_REF" "refs/tags/$ZELT_REF" 2>/dev/null | head -n1 | cut -f1)"
+  fi
   [ -n "$remote" ] || { say "could not reach $ZELT_REPO"; exit 0; }
   [ "$remote" = "$(running_revision)" ] && exit 0
   say "$(date -u +%FT%TZ) updating zelt relay to $remote"
-  fetch_source
+  # fetch_source verifies the signature and stops before building if it fails.
+  ( fetch_source ) || { say "update not verified; keeping the current version"; exit 0; }
   build_image
   run_container
   docker image prune -f --filter "label=org.opencontainers.image.title=zelt relay" >/dev/null 2>&1 || true
