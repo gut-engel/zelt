@@ -17,6 +17,7 @@ import 'package:zelt_core/bytes.dart';
 import 'package:zelt_core/constants.dart';
 import 'package:zelt_core/crypto.dart';
 import 'package:zelt_core/node.dart';
+import 'package:zelt_core/worker.dart';
 
 /// Every option can also come from the environment (used by the Docker
 /// image); command-line arguments win.
@@ -25,6 +26,8 @@ import 'package:zelt_core/node.dart';
 ///   ZELT_STATS_MINUTES (0 = no periodic stats line)
 Future<void> main(List<String> args) async {
   final env = Platform.environment;
+  // A dedicated relay can use more cores for onion processing.
+  Worker.size = int.tryParse(env['ZELT_WORKERS'] ?? '') ?? Platform.numberOfProcessors.clamp(1, 8);
   List<String> list(String? v) =>
       (v ?? '').split(RegExp(r'[,\s]+')).where((x) => x.isNotEmpty).toList();
 

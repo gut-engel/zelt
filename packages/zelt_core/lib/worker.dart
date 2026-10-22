@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:isolate';
 
 /// A long-lived background isolate for CPU-heavy crypto (onion layers,
@@ -9,19 +10,23 @@ import 'dart:isolate';
 class Worker {
   Worker._();
 
-  static Future<SendPort>? _port;
+  /// Number of worker isolates. Jobs are independent, so they spread over all
+  /// of them. Set before the first job (e.g. from ZELT_WORKERS on a relay).
+  static int size = (Platform.numberOfProcessors - 1).clamp(1, 4);
+
+  static List<Future<SendPort>>? _ports;
   static final Map<int, Completer<Object?>> _pending = {};
   static int _next = 0;
   static RawReceivePort? _replies;
+  static final Map<int, Completer<SendPort>> _ready = {};
 
   /// Run jobs inline instead (useful where isolates are unavailable).
   static bool inline = false;
 
-  static Future<SendPort> _start() {
-    final ready = Completer<SendPort>();
+  static List<Future<SendPort>> _start() {
     _replies = RawReceivePort((Object? msg) {
-      if (msg is SendPort) {
-        ready.complete(msg);
+      if (msg is (int, SendPort)) {
+        _ready.remove(msg.$1)?.complete(msg.$2);
         return;
       }
       final (id, ok, value) = msg as (int, bool, Object?);
@@ -33,13 +38,22 @@ class Worker {
         c.completeError(value ?? StateError('worker job failed'));
       }
     });
-    Isolate.spawn(_main, _replies!.sendPort, debugName: 'zelt-crypto', errorsAreFatal: false);
-    return ready.future;
+    return [
+      for (var i = 0; i < size; i++) _spawn(i),
+    ];
   }
 
-  static Future<void> _main(SendPort reply) async {
+  static Future<SendPort> _spawn(int i) {
+    final c = Completer<SendPort>();
+    _ready[i] = c;
+    Isolate.spawn(_main, (i, _replies!.sendPort), debugName: 'zelt-crypto-$i', errorsAreFatal: false);
+    return c.future;
+  }
+
+  static Future<void> _main((int, SendPort) init) async {
+    final (index, reply) = init;
     final jobs = ReceivePort();
-    reply.send(jobs.sendPort);
+    reply.send((index, jobs.sendPort));
     await for (final msg in jobs) {
       final (id, job) = msg as (int, Future<Object?> Function());
       try {
@@ -52,8 +66,9 @@ class Worker {
 
   static Future<T> run<T>(FutureOr<T> Function() job) async {
     if (inline) return await job();
-    final port = await (_port ??= _start());
+    final ports = _ports ??= _start();
     final id = _next++;
+    final port = await ports[id % ports.length];
     final c = Completer<Object?>();
     _pending[id] = c;
     port.send((id, () async => await job()));

@@ -158,7 +158,7 @@ class Link {
   Future<void> _decrypt(Uint8List wire) async {
     if (_closed) return;
     try {
-      final plain = await Crypto.open(_rxKey, _nonce(_rxCtr++), wire);
+      final plain = CryptoSync.open(_rxKey, _nonce(_rxCtr++), wire);
       final t = plain[0];
       if (t >= FrameType.values.length) return;
       final type = FrameType.values[t];
@@ -185,7 +185,7 @@ class Link {
       plain[0] = f.type.index;
       plain.setAll(1, f.body);
       // Padding stays random-looking on the wire because it is encrypted.
-      final wire = await Crypto.seal(_txKey, _nonce(_txCtr++), plain);
+      final wire = CryptoSync.seal(_txKey, _nonce(_txCtr++), plain);
       _socket.add(wire);
       lastActivity = DateTime.now();
     });

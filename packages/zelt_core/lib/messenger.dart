@@ -22,7 +22,11 @@ import 'tokens.dart';
 
 /// Timing knobs. Production defaults; tests shrink them.
 class Timings {
+  /// Mean time between mailbox polls while the app is in the foreground.
   final Duration poll;
+
+  /// Mean time between polls in the background.
+  final Duration pollBackground;
   final Duration tick;
   final Duration hello;
   final Duration request;
@@ -34,7 +38,8 @@ class Timings {
   final Duration coverConstant;
 
   const Timings({
-    this.poll = const Duration(seconds: 20),
+    this.poll = const Duration(seconds: 5),
+    this.pollBackground = const Duration(seconds: 30),
     this.tick = const Duration(seconds: 5),
     this.hello = const Duration(seconds: 45),
     this.request = const Duration(seconds: 8),
@@ -241,7 +246,7 @@ class Messenger {
     await node.start(relay: settings.relay);
     peers.refresh(minRequired: settings.hops);
     await _refreshMailboxes();
-    _timers.add(Timer.periodic(timings.poll, (_) => pollNow()));
+    _schedulePoll();
     _timers.add(Timer.periodic(timings.tick, (_) => _maintenance()));
     _setupCover();
     unawaited(_maintenance());
@@ -257,6 +262,7 @@ class Messenger {
     }
     _timers.clear();
     _coverTimer?.cancel();
+    _pollTimer?.cancel();
     if (handoff) await _handoff();
     await node.stop();
     await save();
@@ -821,10 +827,16 @@ class Messenger {
   /// Sends [payload] to [last] over an onion path. If the first hop does not
   /// answer, the route is rebuilt with other peers.
   Future<bool> _sendOnion(RelayInfo last, Uint8List payload) async {
-    if (node.isSelf(last) && node.relayRunning) {
-      // Our own relay: nobody to hide from, deliver locally.
-      await node.sendPacket(last, await Sphinx.forward([Hop(last)], payload));
-      return true;
+    if (node.isSelf(last)) {
+      // Our own relay: nobody to hide from, deliver locally. The relay may stop
+      // while the packet is being built, so this can fail like any send.
+      if (!node.relayRunning) return false;
+      try {
+        await node.sendPacket(last, await Sphinx.forward([Hop(last)], payload));
+        return true;
+      } catch (_) {
+        return false;
+      }
     }
     final tried = <Uint8List>[];
     for (var attempt = 0; attempt < 3; attempt++) {
@@ -961,6 +973,31 @@ class Messenger {
         return;
       }
     }
+  }
+
+  bool _foreground = true;
+  Timer? _pollTimer;
+
+  /// Foreground polls more often. The rate never depends on whether mail is
+  /// waiting, so it reveals nothing about messages.
+  void setForeground(bool fg) {
+    if (fg == _foreground) return;
+    _foreground = fg;
+    if (fg) unawaited(pollNow());
+    _schedulePoll();
+  }
+
+  /// Exponentially distributed gaps (a Poisson process): no fixed schedule an
+  /// observer could lock onto.
+  void _schedulePoll() {
+    _pollTimer?.cancel();
+    if (!_started) return;
+    final mean = (_foreground ? timings.poll : timings.pollBackground).inMilliseconds;
+    final ms = (-math.log(1 - _rng.nextDouble()) * mean).round().clamp(mean ~/ 10, mean * 4);
+    _pollTimer = Timer(Duration(milliseconds: ms), () {
+      unawaited(pollNow());
+      _schedulePoll();
+    });
   }
 
   /// Mailbox relays with a fetch in flight; each relay is polled on its own

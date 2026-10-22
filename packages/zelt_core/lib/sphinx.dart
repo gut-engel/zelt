@@ -4,6 +4,7 @@ import 'address.dart';
 import 'bytes.dart';
 import 'constants.dart';
 import 'crypto.dart';
+import 'lioness.dart';
 import 'worker.dart';
 
 /// Sphinx-style onion packets.
@@ -17,11 +18,16 @@ import 'worker.dart';
 /// The payload is re-encrypted at each hop. Filler is computed by the sender
 /// so the header length never shrinks.
 ///
+/// The payload is encrypted per hop with LIONESS, a wide-block cipher, as in
+/// the Sphinx paper: tampering anywhere destroys the whole payload, so relays
+/// cannot tag packets. The final hop also checks a payload digest from its
+/// slot, and the blob inside carries end-to-end AEAD.
+///
 /// Departure from textbook Sphinx: per-hop ephemeral keys are carried inside
 /// the encrypted routing info instead of being derived by group-element
-/// blinding, and the payload uses a stream cipher per hop. Payload integrity
-/// is checked by the final hop (a digest in its slot) and end to end by the
-/// AEAD inside the blob.
+/// blinding.
+///
+/// All crypto here is synchronous and runs on the crypto worker pool.
 enum SlotCmd { relay, deliver, toClient }
 
 class Hop {
@@ -39,13 +45,13 @@ class _HopKeys {
   final Uint8List replayTag;
   _HopKeys(this.mac, this.header, this.payload, this.replayTag);
 
-  static Future<_HopKeys> derive(Uint8List shared) async {
-    final k = await Crypto.hkdf(shared, info: 'zelt/sphinx/v1', length: 128);
+  static _HopKeys derive(Uint8List shared) {
+    final k = CryptoSync.hkdf(shared, info: 'zelt/sphinx/v2', length: 32 + 32 + Lioness.keyBytes + 16);
     return _HopKeys(
-      k.sublist(0, 32),
-      k.sublist(32, 64),
-      k.sublist(64, 96),
-      k.sublist(96, 112),
+      Uint8List.sublistView(k, 0, 32),
+      Uint8List.sublistView(k, 32, 64),
+      Uint8List.sublistView(k, 64, 64 + Lioness.keyBytes),
+      Uint8List.sublistView(k, 64 + Lioness.keyBytes),
     );
   }
 }
@@ -149,10 +155,10 @@ class Peeled {
 class Sphinx {
   Sphinx._();
 
-  static Future<(Uint8List, List<_HopKeys>)> _header(
+  static (Uint8List, List<_HopKeys>) _header(
     List<Hop> hops,
     Slot Function(int i, Uint8List nextEph, Uint8List nextMac) slotFor,
-  ) async {
+  ) {
     final n = hops.length;
     if (n < 1 || n > numSlots) throw ArgumentError('1..$numSlots hops');
 
@@ -160,11 +166,11 @@ class Sphinx {
     final keys = <_HopKeys>[];
     final streams = <Uint8List>[];
     for (final h in hops) {
-      final e = await Crypto.x25519Generate();
+      final e = KeyPair25519.generateSync();
       ephs.add(e);
-      final k = await _HopKeys.derive(await Crypto.x25519(e, h.relay.nodePk));
+      final k = _HopKeys.derive(CryptoSync.x25519(e, h.relay.nodePk));
       keys.add(k);
-      streams.add(await Crypto.keystream(k.header, routingSize + slotSize));
+      streams.add(CryptoSync.keystream(k.header, routingSize + slotSize));
     }
 
     // Filler: what earlier hops shift into the tail of the routing info.
@@ -172,7 +178,7 @@ class Sphinx {
     for (var i = 0; i < n - 1; i++) {
       final ext = Uint8List(filler.length + slotSize)..setAll(0, filler);
       final start = routingSize - i * slotSize;
-      xorInto(ext, streams[i].sublist(start, start + ext.length));
+      xorInto(ext, Uint8List.sublistView(streams[i], start, start + ext.length));
       filler = ext;
     }
 
@@ -181,17 +187,17 @@ class Sphinx {
     final inner = Uint8List(lastLen)
       ..setAll(0, slotFor(n - 1, Uint8List(32), Uint8List(16)).encode())
       ..setAll(slotSize, randomBytes(lastLen - slotSize));
-    xorInto(inner, streams[n - 1].sublist(0, lastLen));
+    xorInto(inner, Uint8List.sublistView(streams[n - 1], 0, lastLen));
     var beta = concat([inner, filler]);
-    var mac = (await Crypto.hmac(keys[n - 1].mac, beta)).sublist(0, 16);
+    var mac = CryptoSync.hmac(keys[n - 1].mac, beta).sublist(0, 16);
 
     for (var i = n - 2; i >= 0; i--) {
       final plain = Uint8List(routingSize)
         ..setAll(0, slotFor(i, ephs[i + 1].pub, mac).encode())
-        ..setAll(slotSize, beta.sublist(0, routingSize - slotSize));
-      xorInto(plain, streams[i].sublist(0, routingSize));
+        ..setAll(slotSize, Uint8List.sublistView(beta, 0, routingSize - slotSize));
+      xorInto(plain, Uint8List.sublistView(streams[i], 0, routingSize));
       beta = plain;
-      mac = (await Crypto.hmac(keys[i].mac, beta)).sublist(0, 16);
+      mac = CryptoSync.hmac(keys[i].mac, beta).sublist(0, 16);
     }
     return (concat([ephs[0].pub, mac, beta]), keys);
   }
@@ -201,11 +207,11 @@ class Sphinx {
   static Future<Uint8List> forward(List<Hop> hops, Uint8List payload) =>
       Worker.run(() => _forward(hops, payload));
 
-  static Future<Uint8List> _forward(List<Hop> hops, Uint8List payload) async {
+  static Uint8List _forward(List<Hop> hops, Uint8List payload) {
     if (payload.length != payloadSize) throw ArgumentError('payload size');
-    final digest = await Crypto.sha256(payload);
+    final digest = CryptoSync.sha256(payload);
     final n = hops.length;
-    final (header, keys) = await _header(hops, (i, eph, mac) {
+    final (header, keys) = _header(hops, (i, eph, mac) {
       if (i == n - 1) {
         return Slot(
           SlotCmd.deliver,
@@ -223,9 +229,10 @@ class Sphinx {
         nextMac: mac,
       );
     });
+    // Hop i decrypts one layer, so wrap the innermost (last hop) first.
     final body = Uint8List.fromList(payload);
-    for (final k in keys) {
-      xorInto(body, await Crypto.keystream(k.payload, payloadSize));
+    for (var i = n - 1; i >= 0; i--) {
+      Lioness.encrypt(keys[i].payload, body);
     }
     return concat([header, body]);
   }
@@ -235,13 +242,10 @@ class Sphinx {
   static Future<(Surb, SurbSecret)> surb(List<Hop> hops, Uint8List cookie) =>
       Worker.run(() => _surb(hops, cookie));
 
-  static Future<(Surb, SurbSecret)> _surb(
-    List<Hop> hops,
-    Uint8List cookie,
-  ) async {
+  static (Surb, SurbSecret) _surb(List<Hop> hops, Uint8List cookie) {
     final id = randomBytes(8);
     final n = hops.length;
-    final (header, keys) = await _header(hops, (i, eph, mac) {
+    final (header, keys) = _header(hops, (i, eph, mac) {
       if (i == n - 1) {
         return Slot(
           SlotCmd.toClient,
@@ -269,10 +273,11 @@ class Sphinx {
   static Future<Uint8List> openReply(SurbSecret s, Uint8List payload) =>
       Worker.run(() => _openReply(s, payload));
 
-  static Future<Uint8List> _openReply(SurbSecret s, Uint8List payload) async {
+  static Uint8List _openReply(SurbSecret s, Uint8List payload) {
+    // Each reply hop decrypted one layer in path order; undo from the end.
     final body = Uint8List.fromList(payload);
-    for (final k in s.payloadKeys) {
-      xorInto(body, await Crypto.keystream(k, payloadSize));
+    for (var i = s.payloadKeys.length - 1; i >= 0; i--) {
+      Lioness.encrypt(s.payloadKeys[i], body);
     }
     return body;
   }
@@ -292,40 +297,40 @@ class Sphinx {
     return peeled;
   }
 
-  static Future<(Peeled, Uint8List)?> _peel(KeyPair25519 nodeKey, Uint8List packet) async {
+  static (Peeled, Uint8List)? _peel(KeyPair25519 nodeKey, Uint8List packet) {
     if (packet.length != packetSize) return null;
-    final eph = packet.sublist(0, 32);
-    final mac = packet.sublist(32, 48);
-    final beta = packet.sublist(48, headerSize);
+    final eph = Uint8List.sublistView(packet, 0, 32);
+    final mac = Uint8List.sublistView(packet, 32, 48);
+    final beta = Uint8List.sublistView(packet, 48, headerSize);
     final Uint8List shared;
     try {
-      shared = await Crypto.x25519(nodeKey, eph);
+      shared = CryptoSync.x25519(nodeKey, eph);
     } on FormatException {
       return null;
     }
-    final keys = await _HopKeys.derive(shared);
-    final want = (await Crypto.hmac(keys.mac, beta)).sublist(0, 16);
-    if (!bytesEqual(want, mac)) return null;
+    final keys = _HopKeys.derive(shared);
+    final want = CryptoSync.hmac(keys.mac, beta);
+    if (!bytesEqual(Uint8List.sublistView(want, 0, 16), mac)) return null;
 
     final ext = Uint8List(routingSize + slotSize)..setAll(0, beta);
-    xorInto(ext, await Crypto.keystream(keys.header, routingSize + slotSize));
+    CryptoSync.xorStream(keys.header, ext);
     final Slot slot;
     try {
-      slot = Slot.decode(ext.sublist(0, slotSize));
+      slot = Slot.decode(Uint8List.sublistView(ext, 0, slotSize));
     } on FormatException {
       return null;
     }
 
-    final payload = packet.sublist(headerSize);
-    xorInto(payload, await Crypto.keystream(keys.payload, payloadSize));
+    final payload = Uint8List.fromList(Uint8List.sublistView(packet, headerSize));
+    Lioness.decrypt(keys.payload, payload);
 
     switch (slot.cmd) {
       case SlotCmd.relay:
-        final next = concat([slot.nextEph, slot.nextMac, ext.sublist(slotSize)]);
+        final next = concat([slot.nextEph, slot.nextMac, Uint8List.sublistView(ext, slotSize)]);
         return (Peeled(slot, concat([next, payload]), payload), keys.replayTag);
       case SlotCmd.deliver:
-        final d = (await Crypto.sha256(payload)).sublist(0, 16);
-        if (!bytesEqual(d, slot.extra)) return null;
+        final d = CryptoSync.sha256(payload);
+        if (!bytesEqual(Uint8List.sublistView(d, 0, 16), slot.extra)) return null;
         return (Peeled(slot, null, payload), keys.replayTag);
       case SlotCmd.toClient:
         return (Peeled(slot, null, payload), keys.replayTag);
