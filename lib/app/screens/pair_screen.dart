@@ -106,7 +106,7 @@ class _PairScreenState extends State<PairScreen> {
         content: TextField(
           controller: ctl,
           autofocus: true,
-          decoration: const InputDecoration(labelText: 'Only stored on this phone'),
+          decoration: const InputDecoration(labelText: 'Only stored on this device'),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),

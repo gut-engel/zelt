@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
@@ -123,7 +124,7 @@ class Updater {
       throw UpdateRejected('cannot write to ${appDir.path}; download it from the releases page');
     }
     if (Platform.isLinux) {
-      await _installLinux(file, appDir, tmp);
+      await installLinux(file, appDir, tmp);
     } else if (Platform.isWindows) {
       await _installWindows(file, appDir, tmp);
     }
@@ -144,7 +145,9 @@ class Updater {
 
   /// Unpacks next to the app, then a detached helper waits for this process to
   /// exit, copies the new files over the old ones and starts the new version.
-  static Future<void> _installLinux(File archive, Directory appDir, Directory tmp) async {
+  /// [waitPid] is this process; tests pass another one.
+  @visibleForTesting
+  static Future<void> installLinux(File archive, Directory appDir, Directory tmp, {int? waitPid}) async {
     final stage = Directory('${tmp.path}/zelt-update-stage');
     if (await stage.exists()) await stage.delete(recursive: true);
     await stage.create(recursive: true);
@@ -154,7 +157,7 @@ class Updater {
     final script = File('${tmp.path}/zelt-update.sh');
     String q(String s) => "'${s.replaceAll("'", "'\\''")}'";
     await script.writeAsString('''#!/bin/sh
-while kill -0 $pid 2>/dev/null; do sleep 0.3; done
+while kill -0 ${waitPid ?? pid} 2>/dev/null; do sleep 0.3; done
 cp -a ${q('${stage.path}/.')} ${q('${appDir.path}/')} && rm -rf ${q(tmp.path)}
 exec ${q('${appDir.path}/zelt')} >/dev/null 2>&1
 ''');

@@ -50,7 +50,7 @@ class SettingsScreen extends StatelessWidget {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Wipe everything?'),
-        content: const Text('Deletes your identity, all friends and all messages from this phone. This cannot be undone.'),
+        content: const Text('Deletes your identity, all friends and all messages from this device. This cannot be undone.'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
           FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Wipe')),
@@ -232,7 +232,7 @@ class SettingsScreen extends StatelessWidget {
                   : () => app.update != null ? app.installUpdate() : app.checkForUpdate(manual: true),
             ),
           ],
-          _Header('This phone'),
+          _Header('This device'),
           ListTile(
             title: const Text('Name shown when pairing'),
             subtitle: Text(s.name.isEmpty ? 'Not set' : s.name),

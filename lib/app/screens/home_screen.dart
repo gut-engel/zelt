@@ -117,7 +117,7 @@ class _Empty extends StatelessWidget {
             const SizedBox(height: 8),
             const Text(
               'zelt has no directory. Meet a friend, open "Add friend" on both '
-              'phones and scan each other\'s code. Each friend also becomes part '
+              'devices and scan each other\'s code. Each friend also becomes part '
               'of your network.',
               textAlign: TextAlign.center,
             ),

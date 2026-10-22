@@ -32,7 +32,7 @@ class ContactScreen extends StatelessWidget {
       builder: (ctx) => AlertDialog(
         title: Text('Remove $name?'),
         content: const Text(
-          'Deletes the conversation and keys on this phone. To talk again you '
+          'Deletes the conversation and keys on this device. To talk again you '
           'have to pair in person.',
         ),
         actions: [
@@ -103,7 +103,7 @@ class ContactScreen extends StatelessWidget {
             subtitle: Text(
               c.ready
                   ? 'Double Ratchet over a hybrid X25519 + ML-KEM-768 root.'
-                  : 'Waiting for ${c.name}\'s phone to answer the post-quantum key exchange.',
+                  : 'Waiting for ${c.name}\'s device to answer the post-quantum key exchange.',
             ),
           ),
           ListTile(

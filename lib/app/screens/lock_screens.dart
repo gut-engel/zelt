@@ -65,7 +65,7 @@ class _SetupScreenState extends State<SetupScreen> {
             const SizedBox(height: 32),
             const _Brand(
               'No servers, no accounts, no phone number.\n'
-              'Your identity is a key pair made on this phone.',
+              'Your identity is a key pair made on this device.',
             ),
             const SizedBox(height: 32),
             TextField(
@@ -89,7 +89,7 @@ class _SetupScreenState extends State<SetupScreen> {
             ),
             const SizedBox(height: 8),
             Text(
-              'It seals your messages on this phone. There is no recovery: '
+              'It seals your messages on this device. There is no recovery: '
               'if you forget it, the data is gone.',
               style: Theme.of(context).textTheme.bodySmall,
             ),

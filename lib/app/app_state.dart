@@ -102,7 +102,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       await _savePrefs();
       if (manual && update == null) updateMessage = 'zelt is up to date.';
     } catch (e) {
-      if (manual) updateMessage = 'Update check failed: $e';
+      if (manual) updateMessage = 'Update check failed: ${_errorText(e)}';
     } finally {
       updateChecking = false;
       notifyListeners();
@@ -115,6 +115,12 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     if (last != null && DateTime.now().difference(last) < const Duration(hours: 24)) return;
     unawaited(checkForUpdate());
   }
+
+  /// A sentence for the user, not a Dart exception dump.
+  static String _errorText(Object e) => switch (e) {
+    PlatformException(:final message, :final code) => message ?? code,
+    _ => '$e',
+  };
 
   Future<void> installUpdate() async {
     final u = update;
@@ -133,7 +139,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       );
       updateMessage = Platform.isAndroid ? 'Confirm the installation in the system dialog.' : null;
     } catch (e) {
-      updateMessage = '$e';
+      updateMessage = _errorText(e);
     } finally {
       updateProgress = null;
       notifyListeners();
