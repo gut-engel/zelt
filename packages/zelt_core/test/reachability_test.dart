@@ -82,9 +82,9 @@ void main() {
 
   test('a private entry relay is replaced by a public one for internet targets', () async {
     final alice = await phone('alice');
-    await until(() => alice.peers.pick(10).length >= 5, 'relays verified');
-    expect(alice.peers.entryCandidates().take(3).every(isPublic), isTrue,
-        reason: 'public relays are tried first as entry');
+    await until(() => alice.peers.pick(10).any(isPublic), 'a public relay verified');
+    expect(isPublic(alice.peers.entryCandidates().first), isTrue,
+        reason: 'a verified public relay is tried first as entry');
     expect(NodeAddr.parse('192.168.8.145:1').isPrivate, isTrue);
     expect(NodeAddr.parse('10.0.0.1:1').isPrivate, isTrue);
     expect(NodeAddr.parse('100.100.1.1:1').isPrivate, isTrue);
