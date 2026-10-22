@@ -135,6 +135,54 @@ real anonymity.
 This is an unaudited first implementation. The threat model and the known
 limitations are in docs/PROTOCOL.md.
 
+## Android: background, Doze and battery
+
+**What the code does** (`android/`, `lib/app/app_state.dart`, `packages/zelt_core/lib/messenger.dart`):
+
+- While unlocked, zelt runs a **foreground service** (`ZeltService`, type
+  `specialUse`, `START_STICKY`) with a minimal-priority "zelt is running"
+  notification. The relay and all network code run in the app process; the
+  service only keeps that process at foreground priority. Locking the app stops
+  the service and the relay.
+- It holds **no wake locks** and does **not** ask to be exempted from battery
+  optimisation. It requests no permissions beyond those in the manifest (network,
+  camera for QR codes, foreground service, notifications, installing its own
+  signed updates).
+- **Mailbox polling** happens at random (Poisson) times: on average every 5 s
+  while the app is in the foreground and every 30 s in the background. The rate
+  never depends on whether mail is waiting. Messages that land on your own relay
+  are picked up at once, without waiting for a poll.
+- **Cover traffic** (setting): off; low, with dummy packets at random times about
+  every 30 s on average; or constant, one packet every 2 s.
+
+**What to expect from Android.** This depends on the device and is not under the
+app's control:
+
+- A foreground-service process keeps network access in Doze, but without a wake
+  lock the CPU may sleep while the screen is off. Polls and relaying then happen
+  late, during Android's maintenance windows, and delivery can take minutes.
+- Some manufacturers kill background apps regardless. The Blackview A52 Pro asked
+  to put zelt on its "clean-free" list on first launch. Allow it if you want zelt
+  to keep relaying with the screen locked.
+- If the process is killed, relay data in RAM is lost by design. The 3-copy rule
+  and the sender's retries cover it.
+- Observed on the Blackview A52 Pro (Android 13, screen on, app in the
+  background): messages arrived and showed a content-free notification.
+
+**Data use** (every link frame is 8,217 bytes; one poll is one fetch up and at
+least one reply down per mailbox relay, about 16 KB):
+
+| | per mailbox relay | typical (3 mailbox relays) |
+| --- | --- | --- |
+| Polling, foreground (5 s mean) | ~12 MB/h | ~35 MB/h |
+| Polling, background (30 s mean) | ~2 MB/h | ~6 MB/h |
+| Cover traffic, low | | ~1 MB/h (~24 MB/day) |
+| Cover traffic, constant | | ~15 MB/h (~350 MB/day) |
+| Relaying for others | depends on friends' traffic | |
+
+Foreground polling trades data for latency. A setting to slow it down is a
+sensible next step.
+
 ## License
 
 [AGPL-3.0](LICENSE). If you run a modified relay or ship a modified app, publish
