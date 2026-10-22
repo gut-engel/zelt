@@ -288,7 +288,11 @@ void main() {
     await until(() => ab.ready && ba.ready, 'handshake');
     // A relay Alice has reached (only verified relays are shared) and Bob
     // was never told about directly.
-    final bobInitial = {for (final r in relays.take(2)) (await r.localRelayInfos()).first.key};
+    final bobInitial = {
+      for (final r in relays.take(2)) (await r.localRelayInfos()).first.key,
+      // Bob never lists his own relay as a peer.
+      for (final r in await bob.node.localRelayInfos()) r.key,
+    };
     await until(
       () => alice.peers.shareable(24).any((r) => !bobInitial.contains(r.key)),
       'alice verifies a relay bob lacks',

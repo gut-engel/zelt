@@ -544,6 +544,7 @@ class Messenger {
               .where((r) => !c.theirRelays.any((t) => bytesEqual(t.nodePk, r.nodePk)))
               .toList()
         : <RelayInfo>[];
+    _sentRelaySig[c.id] = await _relaySig();
     return AddressInfo(relays: relays, mailboxes: mbox, relayCreds: creds, known: known);
   }
 
@@ -1275,25 +1276,28 @@ class Messenger {
     }
   }
 
-  String? _sharedSig;
-  DateTime _lastRelaySync = DateTime.fromMillisecondsSinceEpoch(0);
+  /// Per contact: the relay-list signature we last sent them.
+  final Map<String, String> _sentRelaySig = {};
+  final Map<String, DateTime> _lastRelaySync = {};
 
-  /// Sends an update to every friend when our own relay addresses or the
-  /// relays we can reach change, at most once per [Timings.hello].
-  Future<void> _syncRelaysIfChanged() async {
+  Future<String> _relaySig() async {
     final own = await node.localRelayInfos();
     final shared = settings.shareRelays ? peers.shareable(AddressInfo.maxKnown) : <RelayInfo>[];
-    final sig = [...own.map((r) => r.key), '|', ...(shared.map((r) => r.key).toList()..sort())].join(',');
-    if (_sharedSig == null) {
-      _sharedSig = sig;
-      return;
-    }
-    if (sig == _sharedSig) return;
-    if (DateTime.now().difference(_lastRelaySync) < timings.hello) return;
-    _sharedSig = sig;
-    _lastRelaySync = DateTime.now();
-    log('relays changed, syncing with friends');
+    return [...own.map((r) => r.key), '|', ...(shared.map((r) => r.key).toList()..sort())].join(',');
+  }
+
+  /// Sends an update to every friend whose copy of our relay list (own
+  /// addresses plus relays we can reach) is out of date, at most once per
+  /// [Timings.hello] per friend.
+  Future<void> _syncRelaysIfChanged() async {
+    final sig = await _relaySig();
+    final now = DateTime.now();
     for (final c in contacts.values.where((c) => c.ready)) {
+      if (_sentRelaySig[c.id] == sig) continue;
+      final last = _lastRelaySync[c.id];
+      if (last != null && now.difference(last) < timings.hello) continue;
+      _lastRelaySync[c.id] = now;
+      log('relays changed, syncing with ${c.name}');
       await _sendControl(c, MsgType.update);
     }
   }
