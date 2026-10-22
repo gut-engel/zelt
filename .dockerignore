@@ -1,0 +1,5 @@
+# The relay image only needs the pure-Dart core.
+*
+!packages/zelt_core/
+packages/zelt_core/.dart_tool/
+packages/zelt_core/build/

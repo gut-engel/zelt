@@ -1,0 +1,67 @@
+# --- Build output ------------------------------------------------------------
+**/build/
+**/.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+coverage/
+**/doc/api/
+*.apk
+*.aab
+*.ipa
+app.*.symbols
+app.*.map.json
+zelt_relay
+
+# --- Android -------------------------------------------------------------------
+# local.properties holds machine-specific SDK paths.
+android/local.properties
+android/.gradle/
+android/.kotlin/
+android/captures/
+android/app/debug/
+android/app/profile/
+android/app/release/
+android/gradle/wrapper/gradle-wrapper.jar
+android/gradlew
+android/gradlew.bat
+android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java
+**/.cxx/
+
+# Signing material must never be committed.
+key.properties
+**/*.keystore
+**/*.jks
+
+# --- zelt local state ------------------------------------------------------------
+# Identities, keys and logs from the test peer and headless relay.
+zelt-peer*.json
+zelt-relay*.json
+relay-key.json
+peer*.json
+*.cmd
+*.log
+
+# --- Editors and OS -------------------------------------------------------------
+*.iml
+*.ipr
+*.iws
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+.history
+.atom/
+.build/
+.buildlog/
+.swiftpm/
+migrate_working_dir/
+.widget_preview/
+
+# --- Local tool settings --------------------------------------------------------
+.claude/
+.env
+.env.*

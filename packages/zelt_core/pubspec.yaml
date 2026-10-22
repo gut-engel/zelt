@@ -1,0 +1,11 @@
+name: zelt_core
+description: zelt protocol core (pure Dart, no Flutter) and headless relay.
+version: 1.0.0
+publish_to: none
+
+environment:
+  sdk: ^3.10.0
+
+dependencies:
+  cryptography: ^2.9.0
+  pqcrypto: ^0.4.3
