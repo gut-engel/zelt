@@ -405,6 +405,24 @@ Cover traffic options:
 - A relay learns which of its operator's contacts' slots a token came from.
 - A relay restart forgets its spent-token sets (see "What a relay restart
   loses").
+- **The onion and link layers are X25519-only, not post-quantum.** Onion-key
+  certificates are public. An attacker who records traffic today and later has a
+  quantum computer could derive the onion private keys and peel recorded packets.
+  That reveals each packet's route and the per-relay mailbox IDs it was stored
+  under or fetched with, so who talked to which relay when. Message content stays
+  protected: envelope keys come from `rk0`, whose QR seeds never touched the
+  network, and the ratchet root mixes in ML-KEM-768. Making Sphinx post-quantum
+  would need a KEM-based packet format with much larger headers.
+- **The pairing QR code is the secret behind `rk0`.** Its seeds are what keep the
+  root secret from someone who later breaks X25519. Anyone who photographs or
+  films the code gets them, plus the owner's relay addresses. The app blocks
+  screenshots and hides the code after 90 s, but it cannot stop a camera.
+- **Relays run by one operator can still correlate copies by timing.** The 3
+  copies of a message use unrelated mailbox IDs and share no bytes (one envelope
+  nonce per relay), so their contents cannot link them. But an operator who sees
+  stores for different IDs arrive at the same moment on several relays it runs
+  can guess they belong together. Per-hop delays and cover traffic make this
+  harder; they do not prevent it.
 - On Android the network code runs in the app process, kept alive by a foreground
   service. If the system kills the process, relay data is lost by design, and the
   3-copy rule covers it.

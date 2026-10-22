@@ -299,8 +299,12 @@ void main() {
       'alice verifies a relay bob lacks',
     );
     final extra = alice.peers.shareable(24).firstWhere((r) => !bobInitial.contains(r.key));
-    await until(() => bob.peers.known.containsKey(extra.key), 'bob learns alice\'s relays');
-    expect(bob.peers.known[extra.key]!.sources, contains('via:${ba.id}'));
+    // Bob may find the relay through the DHT first; Alice's sync must still
+    // arrive and be recorded as coming from her.
+    await until(
+      () => bob.peers.known[extra.key]?.sources.contains('via:${ba.id}') ?? false,
+      'bob learns alice\'s relays from alice',
+    );
 
     // A relay Alice adds later reaches Bob too.
     final late = await relayNode();
