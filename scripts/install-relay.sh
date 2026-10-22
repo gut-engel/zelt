@@ -267,19 +267,24 @@ run_container() {
 
 show_share() {
   i=0
-  while [ $i -lt 15 ]; do
-    out="$(docker logs "$NAME" 2>&1 | grep 'zelt-relay:' | tail -n 8 || true)"
+  while [ $i -lt 20 ]; do
+    logs="$(docker logs "$NAME" 2>&1 || true)"
+    out="$(printf '%s\n' "$logs" | grep 'zelt-relay:' | tail -n 8 || true)"
     if [ -n "$out" ]; then
       say ""
       say "Add this in the zelt app under Settings > Network and peers > Add relay:"
       printf '%s\n' "$out" | sed 's/^ */  /'
-      first="$(printf '%s\n' "$out" | head -n1 | sed 's/^ *//')"
-      if command -v qrencode >/dev/null 2>&1; then
-        say ""
-        say "Or scan it in the app (Network > Scan relay QR):"
-        qrencode -t ansiutf8 -m 2 "$first"
+      say ""
+      say "Or scan it in the app (Network > Scan relay QR):"
+      # The relay draws its own QR code (no extra tools needed).
+      qr="$(printf '%s\n' "$logs" | sed -n '/-----BEGIN ZELT RELAY QR-----/,/-----END ZELT RELAY QR-----/p' |
+        grep -v -- '-----' | tail -n 60)"
+      if [ -n "$qr" ]; then
+        printf '%s\n' "$qr"
+      elif command -v qrencode >/dev/null 2>&1; then
+        qrencode -t ansiutf8 -m 2 "$(printf '%s\n' "$out" | head -n1 | sed 's/^ *//')"
       else
-        say "(install 'qrencode' to see a QR code here for scanning with the app)"
+        say "(this relay image is too old to draw a QR code; run: ... | sh -s -- update)"
       fi
       return
     fi

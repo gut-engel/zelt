@@ -17,6 +17,7 @@ import 'package:zelt_core/bytes.dart';
 import 'package:zelt_core/constants.dart';
 import 'package:zelt_core/crypto.dart';
 import 'package:zelt_core/node.dart';
+import 'package:zelt_core/terminal_qr.dart';
 import 'package:zelt_core/worker.dart';
 
 /// Every option can also come from the environment (used by the Docker
@@ -95,6 +96,14 @@ Future<void> main(List<String> args) async {
   stdout.writeln('zelt relay running. Share strings:');
   for (final r in mine) {
     stdout.writeln('  ${r.toShareString()}');
+  }
+  // Scan this in the app (Network > Scan relay QR). Public IPv4 first, as the
+  // address most phones can reach.
+  final best = [...mine]..sort((a, b) => (a.addr.isV6 ? 1 : 0) - (b.addr.isV6 ? 1 : 0));
+  if (best.isNotEmpty) {
+    stdout.writeln(qrBegin);
+    stdout.write(terminalQr(best.first.toShareString()));
+    stdout.writeln(qrEnd);
   }
 
   Future<void> announce() async {

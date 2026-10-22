@@ -65,8 +65,10 @@ The installer asks for the port, the public address(es) to advertise (it shows
 what it detected), other relays to announce to, a memory limit and whether to
 update automatically. It then builds the relay from this repository and runs it
 as an unprivileged, read-only container that restarts on its own. It prints a
-`zelt-relay:…` string: share it, or add it in the app under Settings → Network
-and peers → Add relay. Friends' apps pass it on automatically.
+`zelt-relay:…` string and a QR code of it, drawn by the relay itself (no extra
+tools): scan it in the app under Network → Scan relay QR, or paste the string
+under Settings → Network and peers → Add relay. `… | sh -s -- share` shows both
+again. Friends' apps pass it on automatically.
 
 - **Firewall:** open the TCP port you chose (47017 by default). The installer
   tells you how and never changes it itself.

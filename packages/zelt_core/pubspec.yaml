@@ -9,5 +9,6 @@ environment:
 dependencies:
   cryptography: ^2.9.0
   pqcrypto: ^0.4.3
+  qr: ^3.0.2
 dev_dependencies:
   test: ^1.33.0
