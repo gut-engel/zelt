@@ -43,7 +43,8 @@ test/            unit, end-to-end (several nodes on localhost) and widget tests
 
 ```sh
 flutter pub get
-flutter test                 # needs no device; the e2e tests run real TCP nodes
+flutter test                 # widget tests
+(cd packages/zelt_core && dart test)   # protocol, crypto and multi-node end-to-end tests
 flutter build apk --release  # needs the Android SDK
 ```
 

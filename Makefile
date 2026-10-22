@@ -33,7 +33,8 @@ analyze: deps ## static analysis
 	flutter analyze
 	cd $(CORE) && dart analyze
 
-test: deps ## run all tests (unit, multi-node end-to-end, widget)
+test: deps ## run all tests (core unit + multi-node end-to-end, then widget)
+	cd $(CORE) && dart test
 	flutter test
 
 check: analyze test ## analyze + test
