@@ -162,7 +162,17 @@ void main() {
     test('mailbox ids rotate per epoch', () async {
       final k = randomBytes(32);
       expect(hex(await Envelope.mailboxId(k, 1)), isNot(hex(await Envelope.mailboxId(k, 2))));
-      expect((await Envelope.pollIds(k, DateTime.now())).length, mailboxLookback + 1);
+      expect((await Envelope.pollIds(k, DateTime.now())).length, Envelope.idsPerContact);
+    });
+
+    test('recipient polls the next epoch too (sender clock ahead)', () async {
+      final k = randomBytes(32);
+      final now = DateTime.now();
+      final polled = {for (final id in await Envelope.pollIds(k, now)) hex(id)};
+      final e = mailboxEpochOf(now);
+      expect(polled, contains(hex(await Envelope.mailboxId(k, e + 1))));
+      expect(polled, contains(hex(await Envelope.mailboxId(k, e - mailboxLookback))));
+      expect(polled, isNot(contains(hex(await Envelope.mailboxId(k, e + 2)))));
     });
   });
 

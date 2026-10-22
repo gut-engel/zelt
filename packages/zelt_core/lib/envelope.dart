@@ -23,11 +23,15 @@ class Envelope {
     return (await Crypto.hmac(key, w.toBytes())).sublist(0, 16);
   }
 
-  /// Mailbox IDs a recipient polls: the current epoch and the look-back.
+  /// Mailbox IDs a recipient polls: the next epoch (a sender whose clock runs
+  /// ahead), the current one and the look-back that covers the TTL.
   static Future<List<Uint8List>> pollIds(Uint8List key, DateTime now) async {
     final e = mailboxEpochOf(now);
-    return [for (var i = 0; i <= mailboxLookback; i++) await mailboxId(key, e - i)];
+    return [for (var i = -1; i <= mailboxLookback; i++) await mailboxId(key, e - i)];
   }
+
+  /// Mailbox IDs polled per contact.
+  static const idsPerContact = mailboxLookback + 2;
 
   static Future<Uint8List> seal(Uint8List envKey, int kind, Uint8List content) async {
     if (content.length > maxContent) throw ArgumentError('content too large');

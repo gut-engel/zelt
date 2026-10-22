@@ -127,7 +127,7 @@ A **blob** is exactly 7168 bytes: `nonce(12) ‖ AEAD(envKey, kind(u8) ‖ len(u
 The envelope hides the ratchet header from relays.
 
 Mailbox ID: `HMAC(mboxKey, "mb" ‖ epoch)[0:16]`, with `epoch = unixtime / 1 day`.
-The recipient polls the current epoch and the 7 before it (the TTL).
+The recipient polls the next epoch (for senders whose clock runs ahead), the current one and the 7 before it (the TTL): 9 IDs per contact.
 
 Delete key: `HMAC(delKey, SHA-256(blob))`. The relay stores `SHA-256(deleteKey)`.
 
@@ -208,8 +208,8 @@ cap is hit, the oldest blob in that scope goes first.
    hops are random active peers, chosen anew for every packet. If the first hop
    does not answer, it rebuilds the route.
 3. The recipient fetches from every mailbox relay it advertised within the TTL.
-   One fetch packet carries 4 SURBs and at most 221 mailbox IDs (27 contacts at
-   8 IDs each). Longer lists are split over several fetch packets.
+   One fetch packet carries 4 SURBs and at most 221 mailbox IDs (24 contacts at
+   9 IDs each). Longer lists are split over several fetch packets.
    It hashes each blob and checks the seen set (kept for the TTL plus a day)
    *before* decrypting, then deletes the copy on that relay.
 4. Receipts are ordinary ratchet messages. When one arrives, the sender asks all

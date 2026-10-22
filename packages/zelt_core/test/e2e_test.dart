@@ -10,6 +10,7 @@ import 'package:zelt_core/constants.dart';
 import 'package:zelt_core/messenger.dart';
 import 'package:zelt_core/models.dart';
 import 'package:zelt_core/crypto.dart';
+import 'package:zelt_core/envelope.dart';
 import 'package:zelt_core/node.dart';
 import 'package:zelt_core/pairing.dart';
 import 'package:zelt_core/protocol.dart';
@@ -337,12 +338,12 @@ void main() {
     final bob = await messenger('bob', relay: false);
     cleanup.addAll([alice, bob]);
     // 40 other contacts first, so Alice's mailbox IDs land beyond the first
-    // fetch packet (${fetchMaxIds} IDs, ${mailboxLookback + 1} per contact).
+    // fetch packet (${fetchMaxIds} IDs, ${Envelope.idsPerContact} per contact).
     for (var i = 0; i < 40; i++) {
       final c = await dummyContact();
       bob.contacts[c.id] = c;
     }
-    expect(40 * (mailboxLookback + 1), greaterThan(fetchMaxIds));
+    expect(40 * Envelope.idsPerContact, greaterThan(fetchMaxIds));
     await alice.start();
     await bob.start();
     await addRelays(alice);
