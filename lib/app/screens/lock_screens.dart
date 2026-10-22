@@ -157,7 +157,8 @@ class _UnlockScreenState extends State<UnlockScreen> {
   }
 
   Future<void> _go() async {
-    if (_lockedUntil != null) return;
+    // One attempt at a time (Enter can fire while Argon2id is still running).
+    if (_lockedUntil != null || _busy) return;
     setState(() {
       _busy = true;
       _error = null;

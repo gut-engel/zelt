@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -128,9 +129,27 @@ class Vault {
     return until.isAfter(DateTime.now()) ? until : null;
   }
 
+  static Future<void> _attempts = Future.value();
+
   /// Throws [LockedOut] while delayed, [WrongPin] on a wrong PIN. A v1 vault
   /// is upgraded to v2 when [hardware] is given.
-  static Future<Vault> unlock(Directory d, String pin, {HardwareKeyWrapper? hardware}) async {
+  ///
+  /// Attempts are serialised (parallel guesses cannot share one count), and
+  /// each is recorded with its would-be delay *before* the PIN is tested, so
+  /// killing the app mid-check still counts the guess. Success clears it.
+  static Future<Vault> unlock(Directory d, String pin, {HardwareKeyWrapper? hardware}) {
+    final done = Completer<Vault>();
+    _attempts = _attempts.then((_) async {
+      try {
+        done.complete(await _unlock(d, pin, hardware));
+      } catch (e, st) {
+        done.completeError(e, st);
+      }
+    });
+    return done.future;
+  }
+
+  static Future<Vault> _unlock(Directory d, String pin, HardwareKeyWrapper? hardware) async {
     final meta = jsonDecode(await _meta(d).readAsString()) as Map<String, dynamic>;
     final lock = meta['lockUntil'];
     if (lock != null && DateTime.fromMillisecondsSinceEpoch(lock).isAfter(DateTime.now())) {
@@ -140,6 +159,17 @@ class Vault {
     if (v2 && hardware == null) {
       throw StateError('this vault is bound to the hardware key of the device that created it');
     }
+    // Count this attempt as failed until proven otherwise.
+    final failed = (meta['failed'] as int? ?? 0) + 1;
+    meta['failed'] = failed;
+    final delay = delayAfter(failed);
+    if (delay > Duration.zero) {
+      meta['lockUntil'] = DateTime.now().add(delay).millisecondsSinceEpoch;
+    } else {
+      meta.remove('lockUntil');
+    }
+    await _saveMeta(d, meta);
+
     Uint8List? master;
     try {
       var w = unb64(meta['wrapped']);
@@ -148,16 +178,8 @@ class Vault {
     } catch (_) {
       master = null;
     }
-    if (master == null) {
-      final failed = (meta['failed'] as int? ?? 0) + 1;
-      meta['failed'] = failed;
-      final delay = delayAfter(failed);
-      if (delay > Duration.zero) {
-        meta['lockUntil'] = DateTime.now().add(delay).millisecondsSinceEpoch;
-      }
-      await _saveMeta(d, meta);
-      throw WrongPin();
-    }
+    if (master == null) throw WrongPin();
+
     meta['failed'] = 0;
     meta.remove('lockUntil');
     if (!v2 && hardware != null) {

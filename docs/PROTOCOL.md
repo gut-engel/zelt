@@ -62,8 +62,10 @@ guesses can only be tested through that hardware key. v1 vaults are re-wrapped a
 v2 on the next successful Android unlock.
 
 Wrong PINs: 4 are free, then a 30 s delay, doubling up to 1 h between attempts. The
-counter and lock time live in `vault.json`, so they survive restarts. Data is never
-wiped automatically. An attacker who can rewrite the app's files (root) can reset
+counter and lock time live in `vault.json`, so they survive restarts. Attempts are
+serialised, and each one is recorded with its would-be delay *before* the PIN is
+tested. Parallel guesses therefore cannot share one count, and killing the app
+mid-check still counts the guess. Data is never wiped automatically. An attacker who can rewrite the app's files (root) can reset
 the counter, but still has to guess through this device's Keystore.
 
 ## Pairing

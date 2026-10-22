@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -381,6 +382,35 @@ void main() {
       expect(Vault.lockedUntil(d), isNull);
     });
 
+    test('parallel guesses cannot share one attempt count', () async {
+      final hw = FakeHardware();
+      await Vault.create(d, '123456', hardware: hw);
+      final results = await Future.wait([
+        for (var i = 0; i < 8; i++) Vault.unlock(d, 'guess$i', hardware: hw).then((_) => 'ok').catchError((Object e) => e.runtimeType.toString()),
+      ]);
+      expect(results.where((r) => r == 'ok'), isEmpty);
+      // Serialised: 5 wrong guesses are counted, then the rest hit the lockout.
+      expect(results.where((r) => r == 'WrongPin').length, Vault.freeAttempts + 1);
+      expect(results.where((r) => r == 'LockedOut').length, 8 - Vault.freeAttempts - 1);
+      expect(meta()['failed'], Vault.freeAttempts + 1);
+    });
+
+    test('an attempt is counted before the PIN is checked (killing the app does not help)', () async {
+      final gate = Completer<void>();
+      final hw = GatedHardware(gate.future);
+      await Vault.create(d, '123456', hardware: hw);
+      for (var i = 0; i < Vault.freeAttempts; i++) {
+        await expectLater(Vault.unlock(d, 'w$i', hardware: hw.open), throwsA(isA<WrongPin>()));
+      }
+      final pending = Vault.unlock(d, 'still checking', hardware: hw);
+      await Future.delayed(const Duration(milliseconds: 100));
+      // Mid-check (the app could be killed here): already counted and locked.
+      expect(meta()['failed'], Vault.freeAttempts + 1);
+      expect(Vault.lockedUntil(d), isNotNull);
+      gate.complete();
+      await expectLater(pending, throwsA(isA<WrongPin>()));
+    });
+
     test('delay schedule', () {
       expect(Vault.delayAfter(4), Duration.zero);
       expect(Vault.delayAfter(5), const Duration(seconds: 30));
@@ -435,4 +465,30 @@ class FakeHardware implements HardwareKeyWrapper {
 
   @override
   Future<Uint8List> unwrap(Uint8List data) => Crypto.open(_key, data.sublist(0, 12), data.sublist(12));
+}
+
+/// Like [FakeHardware], but unwrap waits for [gate] (to look mid-check).
+class GatedHardware extends FakeHardware {
+  final Future<void> gate;
+  GatedHardware(this.gate);
+
+  /// The same key without the gate.
+  FakeHardware get open => _Ungated(this);
+
+  @override
+  Future<Uint8List> unwrap(Uint8List data) async {
+    await gate;
+    return super.unwrap(data);
+  }
+
+  Future<Uint8List> superUnwrap(Uint8List data) => super.unwrap(data);
+}
+
+class _Ungated extends FakeHardware {
+  final GatedHardware inner;
+  _Ungated(this.inner);
+  @override
+  Future<Uint8List> wrap(Uint8List data) => inner.wrap(data);
+  @override
+  Future<Uint8List> unwrap(Uint8List data) => inner.superUnwrap(data);
 }
