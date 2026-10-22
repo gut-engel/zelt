@@ -8,7 +8,8 @@ import 'crypto.dart';
 ///
 /// A blob is nonce(12) || AEAD(envKey, kind || len || content || pad), always
 /// [blobSize] bytes. The envelope hides the Double Ratchet header from relays
-/// so its keys cannot link messages.
+/// so its keys cannot link messages. Every relay copy gets its own nonce, and
+/// dedup works on the inner content, not on the blob bytes.
 class Envelope {
   Envelope._();
 
@@ -16,19 +17,30 @@ class Envelope {
   static const kindRatchet = 1;
   static const maxContent = blobSize - 12 - 16 - 3;
 
-  static Future<Uint8List> mailboxId(Uint8List key, int epoch) async {
+  /// Per relay: copies of one message on different relays get unrelated IDs,
+  /// so relays (or one operator running several) cannot link them.
+  static Future<Uint8List> mailboxId(Uint8List key, int epoch, Uint8List relayPk) async {
     final w = ByteWriter()
       ..str('mb')
-      ..u32(epoch);
+      ..u32(epoch)
+      ..bytes(relayPk);
     return (await Crypto.hmac(key, w.toBytes())).sublist(0, 16);
   }
 
-  /// Mailbox IDs a recipient polls: the next epoch (a sender whose clock runs
-  /// ahead), the current one and the look-back that covers the TTL.
-  static Future<List<Uint8List>> pollIds(Uint8List key, DateTime now) async {
+  /// Mailbox IDs a recipient polls on [relayPk]: the next epoch (a sender
+  /// whose clock runs ahead), the current one and the look-back that covers
+  /// the TTL.
+  static Future<List<Uint8List>> pollIds(Uint8List key, DateTime now, Uint8List relayPk) async {
     final e = mailboxEpochOf(now);
-    return [for (var i = -1; i <= mailboxLookback; i++) await mailboxId(key, e - i)];
+    return [for (var i = -1; i <= mailboxLookback; i++) await mailboxId(key, e - i, relayPk)];
   }
+
+  /// kind || content: what the outbox keeps and what dedup hashes. Each relay
+  /// copy seals it under a fresh nonce, so copies are not byte-identical.
+  static Uint8List inner(int kind, Uint8List content) => concat([[kind], content]);
+
+  static Future<Uint8List> sealInner(Uint8List envKey, Uint8List inner) =>
+      seal(envKey, inner[0], Uint8List.sublistView(inner, 1));
 
   /// Mailbox IDs polled per contact.
   static const idsPerContact = mailboxLookback + 2;

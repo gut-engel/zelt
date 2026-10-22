@@ -220,11 +220,18 @@ class Contact {
 class Copy {
   final RelayInfo relay;
   final Uint8List mailboxId;
-  Copy(this.relay, this.mailboxId);
 
-  Map<String, dynamic> toJson() => {'r': relay.toJson(), 'm': b64(mailboxId)};
+  /// SHA-256 of this copy's blob (delete key and token are bound to it).
+  final Uint8List? hash;
+  Copy(this.relay, this.mailboxId, [this.hash]);
+
+  Map<String, dynamic> toJson() => {
+    'r': relay.toJson(),
+    'm': b64(mailboxId),
+    if (hash != null) 'h': b64(hash!),
+  };
   factory Copy.fromJson(Map<String, dynamic> j) =>
-      Copy(RelayInfo.fromJson(j['r']), unb64(j['m']));
+      Copy(RelayInfo.fromJson(j['r']), unb64(j['m']), j['h'] == null ? null : unb64(j['h']));
 }
 
 /// An outgoing blob, kept (encrypted at rest) until its receipt arrives.
@@ -236,8 +243,12 @@ class OutItem {
 
   /// Plaintext waiting for the ratchet (only before the handshake is done).
   Uint8List? pending;
-  Uint8List? blob;
-  Uint8List? hash;
+
+  /// Envelope.inner(kind, content): sealed afresh for every relay copy.
+  Uint8List? inner;
+
+  /// A sealed blob from protocol v1 (migrated to [inner] at start-up).
+  Uint8List? legacyBlob;
   int attempts;
   DateTime nextTry;
   final List<Copy> copies;
@@ -248,8 +259,8 @@ class OutItem {
     this.handshake = false,
     this.needsReceipt = true,
     this.pending,
-    this.blob,
-    this.hash,
+    this.inner,
+    this.legacyBlob,
     this.attempts = 0,
     DateTime? nextTry,
     List<Copy>? copies,
@@ -262,8 +273,8 @@ class OutItem {
     'h': handshake,
     'r': needsReceipt,
     if (pending != null) 'p': b64(pending!),
-    if (blob != null) 'b': b64(blob!),
-    if (hash != null) 'x': b64(hash!),
+    if (inner != null) 'i': b64(inner!),
+    if (legacyBlob != null) 'b': b64(legacyBlob!),
     'a': attempts,
     'n': nextTry.millisecondsSinceEpoch,
     'cp': [for (final c in copies) c.toJson()],
@@ -275,8 +286,8 @@ class OutItem {
     handshake: j['h'] ?? false,
     needsReceipt: j['r'] ?? true,
     pending: j['p'] == null ? null : unb64(j['p']),
-    blob: j['b'] == null ? null : unb64(j['b']),
-    hash: j['x'] == null ? null : unb64(j['x']),
+    inner: j['i'] == null ? null : unb64(j['i']),
+    legacyBlob: j['b'] == null ? null : unb64(j['b']),
     attempts: j['a'] ?? 0,
     nextTry: DateTime.fromMillisecondsSinceEpoch(j['n']),
     copies: [for (final c in j['cp'] ?? []) Copy.fromJson(c)],

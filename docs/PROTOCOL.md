@@ -129,10 +129,15 @@ type(u8) msgId(16) body
 A **blob** is exactly 7168 bytes: `nonce(12) ‖ AEAD(envKey, kind(u8) ‖ len(u16) ‖ content ‖ zero pad)`.
 The envelope hides the ratchet header from relays.
 
-Mailbox ID: `HMAC(mboxKey, "mb" ‖ epoch)[0:16]`, with `epoch = unixtime / 1 day`.
-The recipient polls the next epoch (for senders whose clock runs ahead), the current one and the 7 before it (the TTL): 9 IDs per contact.
+Mailbox ID, **per relay**: `HMAC(mboxKey, "mb" ‖ epoch ‖ relayPk)[0:16]`, with
+`epoch = unixtime / 1 day` and `relayPk` the relay's identity. Copies of one
+message on different relays therefore get unrelated IDs. The recipient polls each
+relay with that relay's IDs: the next epoch (for senders whose clock runs ahead),
+the current one and the 7 before it (the TTL), so 9 IDs per contact and relay.
 
-Delete key: `HMAC(delKey, SHA-256(blob))`. The relay stores `SHA-256(deleteKey)`.
+Every relay copy is sealed separately, with its own random nonce, so copies share
+no bytes. Delete key: `HMAC(delKey, SHA-256(this copy's blob))`. The relay stores
+`SHA-256(deleteKey)`, and the store token is bound to the same per-copy hash.
 
 ## Onion packets
 
@@ -261,21 +266,24 @@ cap is hit, the oldest blob in that scope goes first.
 
 ## Delivery
 
-1. The sender seals once and keeps the blob in its encrypted outbox.
-2. It picks up to 3 of the recipient's mailbox relays, distinct by identity, and
-   sends a byte-identical `store` to each over its own fresh onion path. Middle
-   hops are random active peers, chosen anew for every packet. If the first hop
-   does not answer, it rebuilds the route.
+1. The sender encrypts once with the ratchet and keeps the inner content
+   (`kind ‖ ciphertext`) in its encrypted outbox.
+2. It picks up to 3 of the recipient's mailbox relays, distinct by identity. For
+   each, it seals a fresh envelope and sends a `store` under that relay's mailbox
+   ID over its own fresh onion path. Middle hops are random active peers with a
+   valid onion key, chosen anew for every packet. If the first hop does not
+   answer, it rebuilds the route.
 3. The recipient fetches from every mailbox relay it advertised within the TTL.
    One fetch packet carries 4 SURBs and at most 221 mailbox IDs (24 contacts at
    9 IDs each). Longer lists are split over several fetch packets.
-   It hashes each blob and checks the seen set (kept for the TTL plus a day)
-   *before* decrypting, then deletes the copy on that relay.
+   It opens the envelope, hashes the inner content and checks the seen set (kept
+   for the TTL plus a day) *before* the ratchet runs. Copies 2 and 3 end there.
+   It then deletes the copy on that relay.
 4. Receipts are ordinary ratchet messages. When one arrives, the sender asks all
    copy holders to delete.
 5. Without a receipt after the retry window (about 1 min / 1.5 min / 4.5 min for
-   fast, normal and paranoid), it resends the same blob to a new set of relays,
-   with exponential backoff. Duplicates are caught by the seen set, and then by
+   fast, normal and paranoid), it re-seals the same inner content for a new set
+   of relays, with exponential backoff. Duplicates are caught by the seen set, and then by
    the ratchet counter.
 
 ## Peers and discovery
@@ -333,9 +341,10 @@ Cover traffic options:
 
 ## Known limitations
 
-- A fetch sends all of a recipient's current mailbox IDs together, so a mailbox
-  relay can tell that they belong to one recipient. It still cannot tell who that
-  recipient is. IDs rotate daily.
+- A fetch sends all of a recipient's current mailbox IDs for that relay together,
+  so a mailbox relay can tell that they belong to one recipient. It still cannot
+  tell who that recipient is. IDs rotate daily, and copies on other relays use
+  unrelated IDs and bytes. Relays can still correlate copies by timing.
 - A relay learns which of its operator's contacts' slots a token came from.
 - Spent-token sets live in RAM, so a relay restart lets an index be reused once.
   The per-slot quotas still bound the damage. (Onion replay caches are also RAM

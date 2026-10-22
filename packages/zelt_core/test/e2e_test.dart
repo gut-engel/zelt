@@ -383,6 +383,58 @@ void main() {
     await until(() => ba.messages.any((x) => x.text == 'after'), 'delivery after restart');
   });
 
+  test('the 3 copies of a message share no mailbox ID and no bytes', () async {
+    final alice = await messenger('alice');
+    // No relay of his own: all copies go to the 5 external relays.
+    final bob = await messenger('bob', relay: false);
+    cleanup.addAll([alice, bob]);
+    await alice.start();
+    await bob.start();
+    await addRelays(alice);
+    await addRelays(bob);
+    final (ab, ba) = await pair(alice, bob);
+    await until(() => ab.ready && ba.ready, 'handshake');
+
+    // Record every blob as it is stored on any relay.
+    final stored = <(Node, String, String)>[];
+    for (final r in relays) {
+      r.onStored = (mb) {
+        // The blob just stored is the newest one under this mailbox ID.
+        final (blobs, _) = r.store.fetch([mb], 1000);
+        stored.add((r, hex(mb), hex(blobs.last.blob)));
+      };
+    }
+    await Future.delayed(const Duration(milliseconds: 500));
+    stored.clear();
+    await alice.sendText(ab.id, 'unlinkable');
+    await until(() => ba.messages.any((x) => x.text == 'unlinkable'), 'delivery');
+
+    // Bob's mailbox IDs on each relay, for this epoch.
+    final epoch = mailboxEpochOf(DateTime.now());
+    final bobIds = {
+      for (final r in relays) hex(await Envelope.mailboxId(ab.keys.mboxOut, epoch, r.identity.pub)): r,
+    };
+    // Group copies by the message inside (open with Bob's envelope key).
+    final byMessage = <String, List<(Node, String, String)>>{};
+    for (final x in stored.where((x) => bobIds.containsKey(x.$2))) {
+      final (kind, content) = (await Envelope.open(ab.keys.envOut, unhex(x.$3)))!;
+      byMessage.putIfAbsent(hex(Envelope.inner(kind, content)), () => []).add(x);
+    }
+    expect(byMessage.values.any((g) => g.length >= 2), isTrue, reason: 'some message stored on several relays');
+    for (final g in byMessage.values) {
+      // A retry may put another copy on the same relay: fresh bytes, same ID.
+      expect(g.map((x) => x.$3).toSet().length, g.length, reason: 'no byte-identical copies');
+      for (final a in g) {
+        for (final b in g) {
+          if (!identical(a.$1, b.$1)) {
+            expect(a.$2, isNot(b.$2), reason: 'different relays, different mailbox IDs');
+          }
+        }
+      }
+    }
+    expect(ba.messages.where((x) => x.text == 'unlinkable').length, 1, reason: 'dedup on inner content');
+  });
+
   test('share string round trip', () async {
     final r = (await relays.first.localRelayInfos()).first;
     expect(RelayInfo.parseShareString(r.toShareString()), r);

@@ -261,9 +261,27 @@ class Messenger {
 
   // --- Lifecycle -------------------------------------------------------
 
+  /// v1 outbox entries hold one sealed blob; recover the inner content so it
+  /// can be re-sealed per relay.
+  Future<void> _migrateOutbox() async {
+    for (final o in outbox.toList()) {
+      final legacy = o.legacyBlob;
+      if (legacy == null || o.inner != null) continue;
+      final c = contacts[o.contactId];
+      final opened = c == null ? null : await Envelope.open(c.keys.envOut, legacy);
+      if (opened == null) {
+        outbox.remove(o);
+        continue;
+      }
+      o.inner = Envelope.inner(opened.$1, opened.$2);
+      o.legacyBlob = null;
+    }
+  }
+
   Future<void> start() async {
     if (_started) return;
     _started = true;
+    await _migrateOutbox();
     await node.start(relay: settings.relay);
     peers.refresh(minRequired: settings.hops);
     await _refreshMailboxes();
@@ -471,14 +489,12 @@ class Messenger {
       kemCt: !c.keys.initiator ? c.kemCt : null,
       info: await _addressInfoFor(c),
     );
-    final blob = await Envelope.seal(c.keys.envOut, Envelope.kindHandshake, hello.encode());
     final item = OutItem(
       id: hex(randomBytes(16)),
       contactId: c.id,
       handshake: true,
       needsReceipt: false,
-      blob: blob,
-      hash: await Crypto.sha256(blob),
+      inner: Envelope.inner(Envelope.kindHandshake, hello.encode()),
     );
     await _dispatch(item);
     _changed();
@@ -769,8 +785,7 @@ class Messenger {
   Future<void> _seal(Contact c, OutItem o) => _locked(() async {
     if (o.pending == null || c.ratchet == null) return;
     final ct = await c.ratchet!.encrypt(o.pending!, ad: _ad(c));
-    o.blob = await Envelope.seal(c.keys.envOut, Envelope.kindRatchet, ct);
-    o.hash = await Crypto.sha256(o.blob!);
+    o.inner = Envelope.inner(Envelope.kindRatchet, ct);
     o.pending = null;
     _changed();
   });
@@ -781,11 +796,12 @@ class Messenger {
     DelayMode.paranoid => timings.retry * 3,
   };
 
-  /// Sends up to three byte-identical copies to three different mailbox
-  /// relays of the recipient, each over its own onion path.
+  /// Sends up to three copies to three different mailbox relays of the
+  /// recipient, each over its own onion path. Copies share no bytes: every
+  /// relay gets its own mailbox ID and its own envelope nonce.
   Future<int> _dispatch(OutItem o) async {
     final c = contacts[o.contactId];
-    if (c == null || o.blob == null) return 0;
+    if (c == null || o.inner == null) return 0;
     final now = DateTime.now();
     final prev = {for (final cp in o.copies) cp.relay.id};
     final byNode = <String, Credential>{};
@@ -802,20 +818,21 @@ class Messenger {
       return pa - pb;
     });
 
-    final mailboxId = await Envelope.mailboxId(c.keys.mboxOut, mailboxEpochOf(now));
-    final deleteKey = await Envelope.deleteKey(c.keys.delOut, o.hash!);
-    final deleteTag = await Envelope.deleteTag(deleteKey);
+    final epoch = mailboxEpochOf(now);
     var sent = 0;
     final copies = <Copy>[];
     for (final g in grants) {
       if (sent >= copiesPerMessage) break;
       final relay = node.isSelf(g.relay) ? g.relay : (peers.resolve(g.relay.nodePk) ?? g.relay);
-      final token = await g.take(o.hash!);
-      final cmd = StoreCmd(mailboxId, token, deleteTag, o.blob!);
-      final ok = await _sendOnion(relay, cmd.encode());
+      final mailboxId = await Envelope.mailboxId(c.keys.mboxOut, epoch, relay.nodePk);
+      final blob = await Envelope.sealInner(c.keys.envOut, o.inner!);
+      final hash = await Crypto.sha256(blob);
+      final deleteTag = await Envelope.deleteTag(await Envelope.deleteKey(c.keys.delOut, hash));
+      final token = await g.take(hash);
+      final ok = await _sendOnion(relay, StoreCmd(mailboxId, token, deleteTag, blob).encode());
       if (ok) {
         sent++;
-        copies.add(Copy(relay, mailboxId));
+        copies.add(Copy(relay, mailboxId, hash));
       }
     }
     o.attempts++;
@@ -1047,7 +1064,7 @@ class Messenger {
     if (!_started) return;
     final now = DateTime.now();
     for (final c in contacts.values) {
-      for (final id in await Envelope.pollIds(c.keys.mboxIn, now)) {
+      for (final id in await Envelope.pollIds(c.keys.mboxIn, now, identity.node.pub)) {
         if (!bytesEqual(id, mailboxId)) continue;
         final rec = mailboxes.values.where((m) => m.own).firstOrNull ??
             MailboxRecord((await node.localRelayInfos()).first, own: true);
@@ -1092,21 +1109,19 @@ class Messenger {
   Future<void> pollNow() async {
     if (!_started) return;
     try {
-      final idMap = <String, Contact>{};
-      for (final c in contacts.values) {
-        for (final id in await Envelope.pollIds(c.keys.mboxIn, DateTime.now())) {
-          idMap[hex(id)] = c;
-        }
-      }
-      if (idMap.isEmpty) return;
-      final ids = [for (final k in idMap.keys) unhex(k)];
+      if (contacts.isEmpty) return;
       final now = DateTime.now();
       for (final rec in mailboxes.values.toList()) {
         final k = rec.relay.id;
         if (_pollingRelays.contains(k)) continue;
         if (_nextPoll[k]?.isAfter(now) ?? false) continue;
         _pollingRelays.add(k);
-        unawaited(_pollRelay(rec, ids, idMap).catchError((Object e) {
+        unawaited(() async {
+          // Mailbox IDs are per relay.
+          final (ids, idMap) = await _idsFor(rec.relay.nodePk, now);
+          await _pollRelay(rec, ids, idMap);
+        }()
+            .catchError((Object e) {
           log('poll ${rec.relay.addr} failed: $e');
         }).whenComplete(() {
           _pollingRelays.remove(k);
@@ -1119,6 +1134,17 @@ class Messenger {
     } catch (e) {
       log('poll failed: $e');
     }
+  }
+
+  /// Every contact's mailbox IDs on one relay, and which contact owns each.
+  Future<(List<Uint8List>, Map<String, Contact>)> _idsFor(Uint8List relayPk, DateTime now) async {
+    final idMap = <String, Contact>{};
+    for (final c in contacts.values) {
+      for (final id in await Envelope.pollIds(c.keys.mboxIn, now, relayPk)) {
+        idMap[hex(id)] = c;
+      }
+    }
+    return ([for (final k in idMap.keys) unhex(k)], idMap);
   }
 
   Future<void> _pollRelay(MailboxRecord rec, List<Uint8List> ids, Map<String, Contact> idMap) async {
@@ -1180,11 +1206,17 @@ class Messenger {
       _locked(() async {
         final c = idMap[hex(mailboxId)];
         if (c == null) return null;
+        // Delete key for this copy: bound to its own blob hash.
         final hash = await Crypto.sha256(blob);
-        final hk = hex(hash);
         final del = DeleteEntry(mailboxId, hash, await Envelope.deleteKey(c.keys.delIn, hash));
 
-        // Dedup before decrypting: copies 2 and 3 end here.
+        final opened = await Envelope.open(c.keys.envIn, blob);
+        if (opened == null) return null;
+        final (kind, content) = opened;
+
+        // Dedup on the inner content, before the ratchet: every relay copy
+        // has a different envelope, so the blob hash cannot be used.
+        final hk = hex(await Crypto.sha256(Envelope.inner(kind, content)));
         final s = seen[hk];
         if (s != null) {
           if (s.msgId != null &&
@@ -1195,10 +1227,6 @@ class Messenger {
           }
           return del;
         }
-
-        final opened = await Envelope.open(c.keys.envIn, blob);
-        if (opened == null) return null;
-        final (kind, content) = opened;
         // Sent from the responder's pre-chain before our half of the
         // handshake finished: leave it on the relay and fetch it again later.
         if (kind == Envelope.kindRatchet && c.ratchet == null) return null;
@@ -1272,10 +1300,12 @@ class Messenger {
     if (i < 0) return;
     final o = outbox.removeAt(i);
     // Ask the relays to drop the remaining copies early.
-    final key = await Envelope.deleteKey(c.keys.delOut, o.hash!);
     final byRelay = <String, (RelayInfo, List<DeleteEntry>)>{};
     for (final cp in o.copies) {
-      byRelay.putIfAbsent(cp.relay.key, () => (cp.relay, [])).$2.add(DeleteEntry(cp.mailboxId, o.hash!, key));
+      final h = cp.hash;
+      if (h == null) continue;
+      final key = await Envelope.deleteKey(c.keys.delOut, h);
+      byRelay.putIfAbsent(cp.relay.key, () => (cp.relay, [])).$2.add(DeleteEntry(cp.mailboxId, h, key));
     }
     for (final (r, entries) in byRelay.values) {
       unawaited(_sendOnion(r, DeleteCmd(entries).encode()));
@@ -1361,7 +1391,7 @@ class Messenger {
   Future<void> _retryDue() async {
     final now = DateTime.now();
     for (final o in outbox.toList()) {
-      if (o.blob == null || o.nextTry.isAfter(now)) continue;
+      if (o.inner == null || o.nextTry.isAfter(now)) continue;
       if (!outbox.contains(o)) continue;
       await _dispatch(o);
     }

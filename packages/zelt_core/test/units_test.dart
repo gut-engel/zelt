@@ -159,20 +159,35 @@ void main() {
       expect(await Envelope.open(randomBytes(32), b), isNull);
     });
 
-    test('mailbox ids rotate per epoch', () async {
+    test('mailbox ids rotate per epoch and differ per relay', () async {
       final k = randomBytes(32);
-      expect(hex(await Envelope.mailboxId(k, 1)), isNot(hex(await Envelope.mailboxId(k, 2))));
-      expect((await Envelope.pollIds(k, DateTime.now())).length, Envelope.idsPerContact);
+      final r1 = randomBytes(32);
+      final r2 = randomBytes(32);
+      expect(hex(await Envelope.mailboxId(k, 1, r1)), isNot(hex(await Envelope.mailboxId(k, 2, r1))));
+      expect(hex(await Envelope.mailboxId(k, 1, r1)), isNot(hex(await Envelope.mailboxId(k, 1, r2))));
+      expect((await Envelope.pollIds(k, DateTime.now(), r1)).length, Envelope.idsPerContact);
+    });
+
+    test('the same inner content seals to different blobs per copy', () async {
+      final k = randomBytes(32);
+      final inner = Envelope.inner(Envelope.kindRatchet, randomBytes(500));
+      final a = await Envelope.sealInner(k, inner);
+      final b = await Envelope.sealInner(k, inner);
+      expect(hex(a), isNot(hex(b)));
+      final (ka, ca) = (await Envelope.open(k, a))!;
+      final (kb, cb) = (await Envelope.open(k, b))!;
+      expect(Envelope.inner(ka, ca), Envelope.inner(kb, cb));
     });
 
     test('recipient polls the next epoch too (sender clock ahead)', () async {
       final k = randomBytes(32);
       final now = DateTime.now();
-      final polled = {for (final id in await Envelope.pollIds(k, now)) hex(id)};
+      final r = randomBytes(32);
+      final polled = {for (final id in await Envelope.pollIds(k, now, r)) hex(id)};
       final e = mailboxEpochOf(now);
-      expect(polled, contains(hex(await Envelope.mailboxId(k, e + 1))));
-      expect(polled, contains(hex(await Envelope.mailboxId(k, e - mailboxLookback))));
-      expect(polled, isNot(contains(hex(await Envelope.mailboxId(k, e + 2)))));
+      expect(polled, contains(hex(await Envelope.mailboxId(k, e + 1, r))));
+      expect(polled, contains(hex(await Envelope.mailboxId(k, e - mailboxLookback, r))));
+      expect(polled, isNot(contains(hex(await Envelope.mailboxId(k, e + 2, r)))));
     });
   });
 
