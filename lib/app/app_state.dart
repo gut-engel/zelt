@@ -11,10 +11,12 @@ import 'package:zelt_core/messenger.dart';
 import 'package:zelt_core/models.dart';
 import 'package:zelt_core/vault.dart';
 
+import 'updater.dart';
+
 enum Phase { loading, setup, locked, unlocked }
 
 /// Bridges the pure-Dart core to the widget tree and the Android service.
-class AppState extends ChangeNotifier {
+class AppState extends ChangeNotifier with WidgetsBindingObserver {
   static const _service = MethodChannel('zelt/service');
 
   Phase phase = Phase.loading;
@@ -27,14 +29,29 @@ class AppState extends ChangeNotifier {
 
   /// Not secret, so it lives outside the vault and applies to the lock screen.
   ThemeMode themeMode = ThemeMode.system;
+
+  // --- Updates (preferences live outside the vault too) ---
+  bool autoUpdateCheck = true;
+  DateTime? _lastUpdateCheck;
+  AvailableUpdate? update;
+  bool updateChecking = false;
+  double? updateProgress;
+  String? updateMessage;
   int _unseen = 0;
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    messenger?.setForeground(state == AppLifecycleState.resumed);
+  }
+
   Future<void> init() async {
+    WidgetsBinding.instance.addObserver(this);
     final base = await getApplicationSupportDirectory();
     _dir = Directory('${base.path}/zelt');
     await _loadPrefs();
     phase = Vault.exists(_dir) ? Phase.locked : Phase.setup;
     notifyListeners();
+    _maybeAutoCheck();
   }
 
   Messenger get m => messenger!;
@@ -45,20 +62,87 @@ class AppState extends ChangeNotifier {
     try {
       final j = jsonDecode(await _prefsFile.readAsString()) as Map<String, dynamic>;
       themeMode = ThemeMode.values.byName(j['theme'] ?? 'system');
+      autoUpdateCheck = j['autoUpdate'] ?? true;
+      final t = j['lastUpdateCheck'];
+      _lastUpdateCheck = t == null ? null : DateTime.fromMillisecondsSinceEpoch(t);
     } catch (_) {
       themeMode = ThemeMode.system;
+    }
+  }
+
+  Future<void> _savePrefs() async {
+    try {
+      await _dir.create(recursive: true);
+      await _prefsFile.writeAsString(jsonEncode({
+        'theme': themeMode.name,
+        'autoUpdate': autoUpdateCheck,
+        if (_lastUpdateCheck != null) 'lastUpdateCheck': _lastUpdateCheck!.millisecondsSinceEpoch,
+      }));
+    } catch (e) {
+      debugPrint('prefs: $e');
+    }
+  }
+
+  Future<void> setAutoUpdateCheck(bool on) async {
+    autoUpdateCheck = on;
+    notifyListeners();
+    await _savePrefs();
+  }
+
+  /// Checks GitHub for a signed newer release. [manual] reports "up to date".
+  Future<void> checkForUpdate({bool manual = false}) async {
+    if (!Updater.supported || updateChecking) return;
+    updateChecking = true;
+    updateMessage = null;
+    notifyListeners();
+    try {
+      update = await Updater.check();
+      _lastUpdateCheck = DateTime.now();
+      await _savePrefs();
+      if (manual && update == null) updateMessage = 'zelt is up to date.';
+    } catch (e) {
+      if (manual) updateMessage = 'Update check failed: $e';
+    } finally {
+      updateChecking = false;
+      notifyListeners();
+    }
+  }
+
+  void _maybeAutoCheck() {
+    if (!autoUpdateCheck) return;
+    final last = _lastUpdateCheck;
+    if (last != null && DateTime.now().difference(last) < const Duration(hours: 24)) return;
+    unawaited(checkForUpdate());
+  }
+
+  Future<void> installUpdate() async {
+    final u = update;
+    if (u == null) return;
+    updateProgress = 0;
+    updateMessage = null;
+    notifyListeners();
+    try {
+      await Updater.install(
+        u,
+        progress: (p) {
+          updateProgress = p;
+          notifyListeners();
+        },
+        onBeforeExit: () async => messenger?.stop(),
+      );
+      updateMessage = Platform.isAndroid ? 'Confirm the installation in the system dialog.' : null;
+    } catch (e) {
+      updateMessage = '$e';
+    } finally {
+      updateProgress = null;
+      notifyListeners();
     }
   }
 
   Future<void> setThemeMode(ThemeMode mode) async {
     themeMode = mode;
     notifyListeners();
-    try {
-      await _dir.create(recursive: true);
-      await _prefsFile.writeAsString(jsonEncode({'theme': mode.name}));
-    } catch (e) {
-      debugPrint('prefs: $e');
-    }
+    await _savePrefs();
   }
 
   Future<void> setup(String name, String pin) async {

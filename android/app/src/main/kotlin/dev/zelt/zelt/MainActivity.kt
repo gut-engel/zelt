@@ -1,9 +1,14 @@
 package dev.zelt.zelt
 
 import android.Manifest
+import android.app.PendingIntent
 import android.content.Intent
+import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
+import android.provider.Settings
+import java.io.File
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -37,6 +42,8 @@ class MainActivity : FlutterActivity() {
                         stopService(Intent(this, ZeltService::class.java))
                         result.success(null)
                     }
+                    "abi" -> result.success(Build.SUPPORTED_ABIS.firstOrNull())
+                    "installApk" -> installApk(call.argument<String>("path")!!, result)
                     "background" -> {
                         // Keep the engine (and the relay) alive instead of finishing.
                         moveTaskToBack(true)
@@ -45,6 +52,44 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    /**
+     * Hands a verified APK to the system installer. Android shows its own
+     * confirmation and refuses the update unless it is signed with the same
+     * key as the installed app.
+     */
+    private fun installApk(path: String, result: MethodChannel.Result) {
+        if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
+            startActivity(
+                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName"))
+            )
+            result.error("permission", "Allow zelt to install updates, then tap Update again.", null)
+            return
+        }
+        try {
+            val installer = packageManager.packageInstaller
+            val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
+            params.setAppPackageName(packageName)
+            val id = installer.createSession(params)
+            installer.openSession(id).use { session ->
+                File(path).inputStream().use { input ->
+                    session.openWrite("zelt.apk", 0, -1).use { out ->
+                        input.copyTo(out)
+                        session.fsync(out)
+                    }
+                }
+                val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+                    (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0)
+                val pi = PendingIntent.getBroadcast(
+                    this, id, Intent(this, InstallResultReceiver::class.java), flags
+                )
+                session.commit(pi.intentSender)
+            }
+            result.success(null)
+        } catch (e: Exception) {
+            result.error("install", e.message, null)
+        }
     }
 
     private fun askNotificationPermission() {

@@ -41,6 +41,7 @@ class HomeScreen extends StatelessWidget {
         ),
         body: Column(
           children: [
+            const UpdateBanner(),
             const NetworkBanner(),
             Expanded(
               child: contacts.isEmpty

@@ -107,3 +107,44 @@ class NetworkBanner extends StatelessWidget {
     );
   }
 }
+
+/// Offers a verified update, with download progress.
+class UpdateBanner extends StatelessWidget {
+  const UpdateBanner({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final app = context.watch<AppState>();
+    final u = app.update;
+    if (u == null) return const SizedBox.shrink();
+    final scheme = Theme.of(context).colorScheme;
+    final busy = app.updateProgress != null;
+    return Material(
+      color: scheme.primaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+        child: Row(
+          children: [
+            Icon(Icons.system_update, color: scheme.onPrimaryContainer),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('zelt ${u.version} is available', style: TextStyle(color: scheme.onPrimaryContainer)),
+                  if (busy) ...[
+                    const SizedBox(height: 6),
+                    LinearProgressIndicator(value: app.updateProgress == 0 ? null : app.updateProgress),
+                  ] else if (app.updateMessage != null)
+                    Text(app.updateMessage!, style: Theme.of(context).textTheme.bodySmall),
+                ],
+              ),
+            ),
+            TextButton(onPressed: busy ? null : app.installUpdate, child: const Text('Update')),
+          ],
+        ),
+      ),
+    );
+  }
+}

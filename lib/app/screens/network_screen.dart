@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 
 import 'package:zelt_core/address.dart';
 import 'package:zelt_core/constants.dart';
 import '../app_state.dart';
+import 'scan_page.dart';
 import 'widgets.dart';
 
 class NetworkScreen extends StatefulWidget {
@@ -28,6 +30,57 @@ class _NetworkScreenState extends State<NetworkScreen> {
     if (mounted) setState(() => _mine = r);
   }
 
+  void _add(String v) {
+    try {
+      final r = RelayInfo.parseShareString(v);
+      context.read<AppState>().m.addManualPeer(r);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Relay ${r.addr} added')));
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Not a relay address: $e')));
+    }
+  }
+
+  Future<void> _scanPeer() async {
+    final v = await push<String>(
+      context,
+      const ScanPage(title: 'Scan relay QR code', prefixes: ['zelt-relay:']),
+    );
+    if (v != null && mounted) _add(v);
+  }
+
+  /// Shows one of our relay addresses as a QR code for a friend to scan.
+  void _showQr(RelayInfo r) {
+    final text = r.toShareString();
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(r.addr.toString()),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              color: Colors.white,
+              padding: const EdgeInsets.all(12),
+              child: QrImageView(data: text, size: 240, backgroundColor: Colors.white),
+            ),
+            const SizedBox(height: 8),
+            const Text('Friends add it under Network > Scan relay QR.', textAlign: TextAlign.center),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: text));
+              Navigator.pop(ctx);
+            },
+            child: const Text('Copy'),
+          ),
+          FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close')),
+        ],
+      ),
+    );
+  }
+
   Future<void> _addPeer() async {
     final ctl = TextEditingController();
     final v = await showDialog<String>(
@@ -46,11 +99,7 @@ class _NetworkScreenState extends State<NetworkScreen> {
       ),
     );
     if (v == null || !mounted) return;
-    try {
-      context.read<AppState>().m.addManualPeer(RelayInfo.parseShareString(v));
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Not a relay address: $e')));
-    }
+    _add(v);
   }
 
   @override
@@ -76,13 +125,29 @@ class _NetworkScreenState extends State<NetworkScreen> {
         title: const Text('Network'),
         actions: [IconButton(icon: const Icon(Icons.refresh), onPressed: () { _loadMine(); m.pollNow(); })],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _addPeer,
-        icon: const Icon(Icons.add),
-        label: const Text('Add relay'),
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          if (canScanQr) ...[
+            FloatingActionButton.extended(
+              heroTag: 'scanRelay',
+              onPressed: _scanPeer,
+              icon: const Icon(Icons.qr_code_scanner),
+              label: const Text('Scan relay QR'),
+            ),
+            const SizedBox(height: 12),
+          ],
+          FloatingActionButton.extended(
+            heroTag: 'addRelay',
+            onPressed: _addPeer,
+            icon: const Icon(Icons.add),
+            label: const Text('Add relay'),
+          ),
+        ],
       ),
       body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 96),
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 160),
         children: [
           Card(
             child: Padding(
@@ -123,13 +188,10 @@ class _NetworkScreenState extends State<NetworkScreen> {
                   stat('Packets relayed', '${m.node.stats.packetsRelayed}'),
                   if (_mine.isNotEmpty) ...[
                     const SizedBox(height: 8),
-                    Text('Addresses (tap to copy)', style: t.textTheme.labelMedium),
+                    Text('Addresses (tap for QR code)', style: t.textTheme.labelMedium),
                     for (final r in _mine)
                       InkWell(
-                        onTap: () {
-                          Clipboard.setData(ClipboardData(text: r.toShareString()));
-                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Copied')));
-                        },
+                        onTap: () => _showQr(r),
                         child: Padding(
                           padding: const EdgeInsets.symmetric(vertical: 4),
                           child: Text(r.addr.toString(), style: const TextStyle(fontFamily: 'monospace')),

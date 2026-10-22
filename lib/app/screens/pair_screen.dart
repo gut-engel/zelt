@@ -1,6 +1,5 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:provider/provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
@@ -8,6 +7,7 @@ import 'package:zelt_core/messenger.dart';
 import 'package:zelt_core/models.dart';
 import 'package:zelt_core/pairing.dart';
 import '../app_state.dart';
+import 'scan_page.dart';
 import 'widgets.dart';
 
 /// In-person pairing: both phones show their code and scan the other's.
@@ -32,7 +32,10 @@ class _PairScreenState extends State<PairScreen> {
   }
 
   Future<void> _scan() async {
-    final code = await push<String>(context, const _ScanPage());
+    final code = await push<String>(
+      context,
+      const ScanPage(title: 'Scan friend\'s code', prefixes: [PairingCode.prefix]),
+    );
     if (code == null || !mounted) return;
     await _complete(code);
   }
@@ -44,7 +47,7 @@ class _PairScreenState extends State<PairScreen> {
     final code = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Paste code (debug)'),
+        title: Text(canScanQr ? 'Paste code (debug)' : 'Friend\'s code'),
         content: TextField(key: const Key('debugCode'), controller: ctl, autofocus: true, maxLines: 4),
         actions: [
           FilledButton(onPressed: () => Navigator.pop(ctx, ctl.text.trim()), child: const Text('Pair')),
@@ -128,12 +131,21 @@ class _PairScreenState extends State<PairScreen> {
             Text('2. Scan their code', style: t.textTheme.titleMedium),
             const SizedBox(height: 12),
             if (_paired == null) ...[
-              FilledButton.icon(
-                onPressed: s == null ? null : _scan,
-                icon: const Icon(Icons.qr_code_scanner),
-                label: const Text('Scan friend\'s code'),
-              ),
-              if (kDebugMode || kProfileMode)
+              if (canScanQr)
+                FilledButton.icon(
+                  onPressed: s == null ? null : _scan,
+                  icon: const Icon(Icons.qr_code_scanner),
+                  label: const Text('Scan friend\'s code'),
+                )
+              else
+                // Desktop has no camera scanner: type or paste the code shown
+                // on your friend's phone while you are together.
+                FilledButton.icon(
+                  onPressed: s == null ? null : _paste,
+                  icon: const Icon(Icons.keyboard),
+                  label: const Text('Enter friend\'s code'),
+                ),
+              if (canScanQr && (kDebugMode || kProfileMode))
                 TextButton(onPressed: s == null ? null : _paste, child: const Text('Paste code (debug)')),
             ],
             if (_paired != null)
@@ -157,58 +169,6 @@ class _PairScreenState extends State<PairScreen> {
             ],
           ],
         ),
-      ),
-    );
-  }
-}
-
-class _ScanPage extends StatefulWidget {
-  const _ScanPage();
-
-  @override
-  State<_ScanPage> createState() => _ScanPageState();
-}
-
-class _ScanPageState extends State<_ScanPage> {
-  final _controller = MobileScannerController(formats: const [BarcodeFormat.qrCode]);
-  bool _done = false;
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  void _onDetect(BarcodeCapture cap) {
-    if (_done) return;
-    for (final b in cap.barcodes) {
-      final v = b.rawValue;
-      if (v != null && v.startsWith(PairingCode.prefix)) {
-        _done = true;
-        Navigator.pop(context, v);
-        return;
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Scan friend\'s code')),
-      body: Stack(
-        children: [
-          MobileScanner(controller: _controller, onDetect: _onDetect),
-          Center(
-            child: Container(
-              width: 260,
-              height: 260,
-              decoration: BoxDecoration(
-                border: Border.all(color: Colors.white, width: 3),
-                borderRadius: BorderRadius.circular(16),
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }

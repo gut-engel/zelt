@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'package:zelt_core/constants.dart';
 import 'package:zelt_core/models.dart';
 import '../app_state.dart';
+import '../updater.dart';
 import 'network_screen.dart';
 import 'widgets.dart';
 
@@ -200,6 +201,35 @@ class SettingsScreen extends StatelessWidget {
               ),
             ),
           ),
+          if (Updater.supported) ...[
+            _Header('Updates'),
+            FutureBuilder(
+              future: Updater.info(),
+              builder: (context, snap) => ListTile(
+                title: const Text('Version'),
+                subtitle: Text(snap.hasData ? '${snap.data!.version} (build ${snap.data!.buildNumber})' : ''),
+              ),
+            ),
+            SwitchListTile(
+              title: const Text('Check for updates automatically'),
+              subtitle: const Text(
+                'Once a day, from github.com (which sees your IP address). Updates are '
+                'installed only if signed by the zelt release key.',
+              ),
+              value: app.autoUpdateCheck,
+              onChanged: app.setAutoUpdateCheck,
+            ),
+            ListTile(
+              title: Text(app.update != null ? 'Update to ${app.update!.version}' : 'Check now'),
+              subtitle: app.updateMessage == null ? null : Text(app.updateMessage!),
+              trailing: app.updateChecking || app.updateProgress != null
+                  ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.system_update),
+              onTap: app.updateChecking || app.updateProgress != null
+                  ? null
+                  : () => app.update != null ? app.installUpdate() : app.checkForUpdate(manual: true),
+            ),
+          ],
           _Header('This phone'),
           ListTile(
             title: const Text('Name shown when pairing'),

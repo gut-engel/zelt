@@ -216,6 +216,14 @@ show_share() {
       say ""
       say "Add this in the zelt app under Settings > Network and peers > Add relay:"
       printf '%s\n' "$out" | sed 's/^ */  /'
+      first="$(printf '%s\n' "$out" | head -n1 | sed 's/^ *//')"
+      if command -v qrencode >/dev/null 2>&1; then
+        say ""
+        say "Or scan it in the app (Network > Scan relay QR):"
+        qrencode -t ansiutf8 -m 2 "$first"
+      else
+        say "(install 'qrencode' to see a QR code here for scanning with the app)"
+      fi
       return
     fi
     i=$((i + 1))
