@@ -66,6 +66,33 @@ void main() {
     expect(await Sphinx.peel(keys[2], tampered, ReplayFilter()), isNull);
   });
 
+  test('a flipped payload bit after hop k garbles the payload at hop k+1 (no tagging)', () async {
+    final (keys, hops) = await makeHops(4);
+    final payload = randomBytes(payloadSize);
+    final pkt0 = await Sphinx.forward(hops, payload);
+    // Walk the honest path, keeping each hop's input packet.
+    final inputs = <Uint8List>[pkt0];
+    for (var i = 0; i < 3; i++) {
+      inputs.add((await Sphinx.peel(keys[i], inputs[i], ReplayFilter()))!.next!);
+    }
+    for (var k = 0; k < 3; k++) {
+      // A malicious hop k flips one payload bit in what it forwards.
+      final tampered = Uint8List.fromList(inputs[k + 1])..[headerSize + 4321] ^= 0x10;
+      final honest = await Sphinx.peel(keys[k + 1], inputs[k + 1], ReplayFilter());
+      final bad = await Sphinx.peel(keys[k + 1], tampered, ReplayFilter());
+      if (k + 1 == 3) {
+        expect(bad, isNull, reason: 'last hop rejects a tampered payload');
+        continue;
+      }
+      var same = 0;
+      for (var i = 0; i < payloadSize; i++) {
+        if (honest!.payload[i] == bad!.payload[i]) same++;
+      }
+      // Unrelated random bytes match ~1/256 of the time.
+      expect(same, lessThan(payloadSize ~/ 100), reason: 'hop ${k + 1}: $same/$payloadSize bytes survived');
+    }
+  });
+
   test('replays are dropped', () async {
     final (keys, hops) = await makeHops(2);
     final pkt = await Sphinx.forward(hops, Uint8List(payloadSize));

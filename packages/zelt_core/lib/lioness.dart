@@ -3,7 +3,8 @@ import 'dart:typed_data';
 import 'crypto.dart';
 
 /// LIONESS wide-block cipher (Anderson & Biham), the payload cipher of the
-/// Sphinx paper, built from ChaCha20 (stream) and keyed BLAKE2b (hash).
+/// Sphinx paper, built from ChaCha20 (stream) and HMAC-SHA256 (hash), so the
+/// payload cipher rests on the same two primitives as the rest of zelt.
 ///
 /// The whole block is one permutation: changing any bit of the input
 /// changes every bit of the output unpredictably. A relay that tampers with a
@@ -27,7 +28,7 @@ class Lioness {
   }
 
   static void _hashRound(Uint8List b, Uint8List k) {
-    final h = CryptoSync.blake2bMac(k, Uint8List.sublistView(b, _l));
+    final h = CryptoSync.hmac(k, Uint8List.sublistView(b, _l));
     for (var i = 0; i < _l; i++) {
       b[i] ^= h[i];
     }

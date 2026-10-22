@@ -1,4 +1,4 @@
-# zelt protocol, v1
+# zelt protocol, v2
 
 This describes what the code in `packages/zelt_core/lib/` implements. Constants live in
 `packages/zelt_core/lib/constants.dart`; changing any of them breaks wire compatibility.
@@ -139,43 +139,42 @@ Slot (120 bytes): `cmd(1) delayMs(u32) nextAddr(19) nextPk(32) nextEph(32) nextM
 Commands are `relay`, `deliver` (run the payload command here) and `toClient`
 (`extra` = connection cookie ‖ SURB id).
 
-Each hop computes `s = X25519(nodeKey, eph)` and derives keys with
-`HKDF(s, "zelt/sphinx/v1")`: a MAC key, a header stream key, a payload stream key
-and a replay tag. It checks the MAC over the routing info, rejects replayed tags,
-decrypts `routing ‖ 0^120`, reads its slot and decrypts one payload layer.
-Senders compute filler so the header never shrinks. For `deliver`, the slot's
-`extra` holds `SHA-256(payload)[0:16]`, checked by the final hop.
+Each hop computes `s = X25519(nodeKey, eph)` and derives 208 bytes with
+`HKDF(s, "zelt/sphinx/v2")`: a MAC key (32), a header stream key (32), LIONESS
+payload keys (128) and a replay tag (16). It checks the MAC over the routing info,
+rejects replayed tags, decrypts `routing ‖ 0^120`, reads its slot and decrypts
+one payload layer. Senders compute filler so the header never shrinks. For
+`deliver`, the slot's `extra` holds `SHA-256(payload)[0:16]`, checked by the
+final hop.
+
+**Payload cipher: LIONESS.** Each hop decrypts one layer of LIONESS (Anderson &
+Biham), the wide-block cipher of the Sphinx paper. It is built from ChaCha20 and
+HMAC-SHA256 only. The block is `L` (32 bytes) ‖ `R` (7272 bytes), with keys
+`K1..K4` (32 bytes each):
+
+```
+encrypt:  R ^= ChaCha20(L ^ K1);  L ^= HMAC(K2, R)[0:32];  R ^= ChaCha20(L ^ K3);  L ^= HMAC(K4, R)[0:32]
+decrypt:  the same steps in reverse order
+```
+
+The sender wraps the last hop's layer first. SURB replies are decrypted by each
+hop in path order, and the client undoes the layers from the end. Changing any
+bit at any hop turns the payload into unrelated random bytes at every later hop
+(tested in `sphinx_test.dart`), so relays cannot tag packets. The final hop's
+digest check and the end-to-end AEAD reject the result.
 
 This is *Sphinx-style*, not textbook Sphinx: per-hop ephemeral keys travel inside
-the encrypted routing info instead of being derived by blinding, and the payload
-uses a per-hop stream cipher instead of a wide-block cipher. Intermediate hops
-cannot detect payload tagging, but the final hop and the end-to-end AEAD do.
-
-**SURBs** (single-use reply blocks, `firstHop(51) ‖ header(888)`) let a relay
-answer a client it cannot identify. The client keeps one registered link to an
-*entry* relay, which is the SURB's last hop.
-
-### Payload commands (executed by the last hop)
-
-| Code | Command | Body |
-| --- | --- | --- |
-| 1 | store | mailboxId(16) token(24) deleteTag(32) blob |
-| 2 | fetch | n(u8) × SURB, m(u16) × mailboxId (4 SURBs, ≤ 221 IDs per packet) |
-| 3 | delete | n(u8) × (mailboxId, hash, deleteKey) |
-| 4 | drop | cover traffic |
-| 5 | tokenReq | SURB → public credential |
-| 6 | dhtFind | SURB, target(32) → up to 8 RelayInfo |
-| 7 | handoff | mailboxId deleteTag expiresAt(u64) blob |
-
-Every reply carries `type last(u8) partners(≤2 RelayInfo)`. The partners are where
-the relay hands off its blobs on a clean shutdown, so recipients know where to look
-when the relay disappears.
+the encrypted routing info instead of being derived by blinding.
 
 ## Links
 
-TCP, with a server-authenticated handshake: the client sends an ephemeral X25519
-key and the server answers with its own. Then
-`keys = HKDF(DH(ce, nodePk) ‖ DH(ce, se), salt = ce ‖ se ‖ nodePk)`. Only the
+TCP, with a server-authenticated handshake. Each side first sends a preamble,
+`"ZLT" ‖ protocolVersion(1)`. If the versions differ, the server answers with
+its own preamble and closes, and the client reports which version the peer runs.
+A v1 node sends no preamble and is refused the same way. Then the client sends
+an ephemeral X25519 key and the server answers with its own:
+`keys = HKDF(DH(ce, nodePk) ‖ DH(ce, se), salt = preamble ‖ ce ‖ se ‖ nodePk, info = "zelt/link/v2")`.
+The version is bound into the keys, so a downgrade cannot be forced. Only the
 holder of the advertised node key can read the link, and the client stays
 anonymous. Every frame is `AEAD(type(1) ‖ body padded to 8200)`, 8217 bytes on
 the wire.
@@ -280,7 +279,6 @@ Cover traffic options:
 - A relay learns which of its operator's contacts' slots a token came from.
 - Spent-token sets live in RAM, so a relay restart lets an index be reused once.
   The per-slot quotas still bound the damage.
-- No wide-block payload cipher yet (see Onion packets).
 - On Android the network code runs in the app process, kept alive by a foreground
   service. If the system kills the process, relay data is lost by design, and the
   3-copy rule covers it.

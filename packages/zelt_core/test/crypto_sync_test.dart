@@ -44,16 +44,6 @@ void main() {
     expect(() => CryptoSync.open(k, n, Uint8List.fromList(sealed)..[3] ^= 1, aad: [1, 2]), throwsA(anything));
   });
 
-  test('keyed BLAKE2b matches the official BLAKE2 known-answer test', () {
-    // blake2b-kat.txt, first keyed entry: key = 00..3f, input empty.
-    final key = Uint8List.fromList(List.generate(64, (i) => i));
-    expect(
-      hex(CryptoSync.blake2bMac(key, const [], length: 64)),
-      '10ebb67700b1868efb4417987acf4690ae9d972fb7a590c2f02871799aaa4786'
-      'b5e996e8f0f4eb981fc214b005f42d2ff4233499391653df7aefcbc13fc51568',
-    );
-  });
-
   test('sync key generation gives the same public key as the library', () async {
     final kp = KeyPair25519.generateSync();
     expect(kp.pub, (await Crypto.x25519FromPrivate(kp.priv)).pub);

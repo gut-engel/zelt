@@ -206,15 +206,6 @@ class CryptoSync {
 
   static Uint8List sha256(List<int> data) => Uint8List.fromList(_sha256.hashSync(data).bytes);
 
-  /// Keyed BLAKE2b (RFC 7693), a PRF/MAC; about twice as fast as HMAC-SHA256
-  /// in pure Dart.
-  static Uint8List blake2bMac(List<int> key, List<int> data, {int length = 32}) {
-    final b2 = DartBlake2b(hashLengthInBytes: length);
-    return Uint8List.fromList(
-      b2.calculateMacSync(data, secretKeyData: SecretKeyData(key), nonce: _noNonce).bytes,
-    );
-  }
-
   /// RFC 5869 HKDF-SHA256.
   static Uint8List hkdf(List<int> ikm, {List<int> salt = const [], required String info, int length = 32}) =>
       hkdfBytes(ikm, salt: salt, info: utf8.encode(info), length: length);

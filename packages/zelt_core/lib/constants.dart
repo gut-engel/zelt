@@ -1,7 +1,9 @@
 /// Protocol constants. Changing any of these breaks wire compatibility.
 library;
 
-const int protocolVersion = 1;
+/// v2: LIONESS payloads, versioned link handshake. Nodes of different
+/// versions refuse each other cleanly (see Link).
+const int protocolVersion = 2;
 
 // --- Onion packets (Sphinx-style) ---------------------------------------
 

@@ -7,6 +7,23 @@ import 'bytes.dart';
 import 'constants.dart';
 import 'crypto.dart';
 
+/// The other side speaks a different protocol version.
+class IncompatiblePeer implements Exception {
+  final int? theirVersion;
+  IncompatiblePeer(this.theirVersion);
+  @override
+  String toString() => theirVersion == null
+      ? 'peer runs an incompatible zelt version (v1 or not zelt)'
+      : 'peer runs zelt protocol v$theirVersion, we run v$protocolVersion';
+}
+
+/// Handshake preamble: "ZLT" + protocol version byte.
+final Uint8List _magic = Uint8List.fromList([0x5a, 0x4c, 0x54]);
+Uint8List get _preamble => Uint8List.fromList([..._magic, protocolVersion]);
+
+int? _versionOf(Uint8List preamble) =>
+    bytesEqual(preamble.sublist(0, 3), _magic) ? preamble[3] : null;
+
 enum FrameType { packet, register, clientDelivery, announce, ping, pong, pad }
 
 class Frame {
@@ -25,9 +42,12 @@ class Frame {
 
 /// An encrypted, server-authenticated TCP link between two nodes.
 ///
-/// Handshake: the client sends an ephemeral X25519 key, the server answers
-/// with its own. Keys come from DH(ce, server static) and DH(ce, se), so only
-/// the holder of the node key named in the [RelayInfo] can read the link.
+/// Handshake: both sides first send "ZLT" + protocol version; a mismatch ends
+/// the connection with [IncompatiblePeer]. Then the client sends an ephemeral
+/// X25519 key and the server answers with its own. Keys come from
+/// DH(ce, server static) and DH(ce, se), with the version bound into the salt,
+/// so only the holder of the node key named in the [RelayInfo] can read the
+/// link and nobody can force a downgrade.
 /// The client stays anonymous. Every frame has the same size on the wire.
 class Link {
   final Socket _socket;
@@ -71,8 +91,8 @@ class Link {
   ) async {
     final k = await Crypto.hkdf(
       concat([es, ee]),
-      salt: concat([ce, se, sk]),
-      info: 'zelt/link/v1',
+      salt: concat([_preamble, ce, se, sk]),
+      info: 'zelt/link/v$protocolVersion',
       length: 64,
     );
     return (k.sublist(0, 32), k.sublist(32, 64));
@@ -87,8 +107,13 @@ class Link {
     try {
       s.setOption(SocketOption.tcpNoDelay, true);
       final ce = await Crypto.x25519Generate();
-      s.add(ce.pub);
-      final (se, rest) = await _readExact(s, 32, timeout);
+      s.add(concat([_preamble, ce.pub]));
+      final reader = _SocketReader(s);
+      final pre = await reader.read(4).timeout(timeout);
+      final v = _versionOf(pre);
+      if (v != protocolVersion) throw IncompatiblePeer(v);
+      final se = await reader.read(32).timeout(timeout);
+      final rest = reader.detach();
       final es = await Crypto.x25519(ce, r.nodePk);
       final ee = await Crypto.x25519(ce, se);
       final (c2s, s2c) = await _keys(es, ee, ce.pub, se, r.nodePk);
@@ -107,9 +132,19 @@ class Link {
     s.done.catchError((_) {}).ignore();
     try {
       s.setOption(SocketOption.tcpNoDelay, true);
-      final (ce, rest) = await _readExact(s, 32, timeout);
+      final reader = _SocketReader(s);
+      final pre = await reader.read(4).timeout(timeout);
+      final v = _versionOf(pre);
+      if (v != protocolVersion) {
+        // Tell a zelt peer of another version what we speak, then hang up.
+        if (v != null) s.add(_preamble);
+        await s.flush().catchError((_) {});
+        throw IncompatiblePeer(v);
+      }
+      final ce = await reader.read(32).timeout(timeout);
+      final rest = reader.detach();
       final se = await Crypto.x25519Generate();
-      s.add(se.pub);
+      s.add(concat([_preamble, se.pub]));
       final es = await Crypto.x25519(nodeKey, ce);
       final ee = await Crypto.x25519(se, ce);
       final (c2s, s2c) = await _keys(es, ee, ce, se.pub, nodeKey.pub);
@@ -118,16 +153,6 @@ class Link {
       s.destroy();
       rethrow;
     }
-  }
-
-  static Future<(Uint8List, Uint8List)> _readExact(
-    Socket s,
-    int n,
-    Duration timeout,
-  ) async {
-    final r = _SocketReader(s);
-    final head = await r.read(n).timeout(timeout);
-    return (head, r.detach());
   }
 
   /// Must be called once after construction to start receiving.
