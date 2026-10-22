@@ -10,6 +10,26 @@ class NodeAddr {
 
   NodeAddr(this.ip, this.port);
 
+  /// Private, shared (CGNAT), link-local or loopback: reachable only from the
+  /// same network, never from a relay on the public internet.
+  bool get isPrivate {
+    final b = ip.rawAddress;
+    if (ip.type == InternetAddressType.IPv4) {
+      return b[0] == 10 ||
+          b[0] == 127 ||
+          (b[0] == 172 && b[1] >= 16 && b[1] < 32) ||
+          (b[0] == 192 && b[1] == 168) ||
+          (b[0] == 100 && b[1] >= 64 && b[1] < 128) ||
+          (b[0] == 169 && b[1] == 254);
+    }
+    if (b.length != 16) return true;
+    // IPv4-mapped (::ffff:a.b.c.d): judge the IPv4 address.
+    if (b.sublist(0, 10).every((x) => x == 0) && b[10] == 0xff && b[11] == 0xff) {
+      return NodeAddr(InternetAddress.fromRawAddress(b.sublist(12)), port).isPrivate;
+    }
+    return ip.isLoopback || (b[0] & 0xfe) == 0xfc || (b[0] == 0xfe && (b[1] & 0xc0) == 0x80);
+  }
+
   static const encodedSize = 19;
 
   factory NodeAddr.parse(String s) {

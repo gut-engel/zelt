@@ -69,6 +69,19 @@ class PeerManager {
   /// Accept loopback relay addresses (tests and single-machine setups only).
   bool allowLoopback = false;
 
+  /// Test hook: decides which relays sit on the public internet.
+  bool Function(RelayInfo r)? publicOverride;
+
+  /// Whether [r] can be reached from relays on the public internet. A relay
+  /// also known under a private address is treated as being behind a home
+  /// router: its global IPv6 address is usually firewalled.
+  bool isPublic(RelayInfo r) {
+    final o = publicOverride;
+    if (o != null) return o(r);
+    if (r.addr.isPrivate) return false;
+    return !known.values.any((k) => bytesEqual(k.relay.nodePk, r.nodePk) && k.relay.addr.isPrivate);
+  }
+
   void add(RelayInfo r, String source) {
     if (selfPk != null && bytesEqual(r.nodePk, selfPk!)) return;
     // A loopback or link-local address from another device can never work.
@@ -294,7 +307,10 @@ class PeerManager {
   List<RelayInfo> entryCandidates({Iterable<Uint8List> exclude = const []}) {
     final ex = {for (final e in exclude) hex(e)};
     final all = [for (final k in active) known[k]!]..removeWhere((r) => ex.contains(r.relay.id));
-    all.sort((a, b) => (verified(b) ? 1 : 0) - (verified(a) ? 1 : 0));
+    // Verified first; then public relays: replies reach us through the entry,
+    // and relays on the internet can only hand packets to public addresses.
+    int rank(PeerRecord r) => (verified(r) ? 2 : 0) + (isPublic(r.relay) ? 1 : 0);
+    all.sort((a, b) => rank(b) - rank(a));
     return [for (final r in all) r.relay];
   }
 

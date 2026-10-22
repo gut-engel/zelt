@@ -1094,16 +1094,26 @@ class Messenger {
   List<Hop>? _route(RelayInfo last, {Iterable<Uint8List> exclude = const []}) {
     final end = node.hopFor(last, delayMs: _hopDelay());
     if (end == null) return null;
-    final mids = peers.pick(
+    // A relay on the internet cannot reach a private address: to a private
+    // destination only private hops lead; otherwise private hops go first.
+    final lastPublic = peers.isPublic(last);
+    final mids = _travelOrder(peers.pick(
       settings.hops - 1,
       exclude: [last.nodePk, identity.node.pub, ...exclude],
-      usable: _hasKey,
-    );
+      usable: (r) => _hasKey(r) && (lastPublic || !peers.isPublic(r)),
+    ));
     return [
       for (final m in mids) node.hopFor(m, delayMs: _hopDelay())!,
       end,
     ];
   }
+
+  /// Orders middle hops in travel direction so that no hop has to reach a
+  /// private address from the public internet: private relays first.
+  List<RelayInfo> _travelOrder(List<RelayInfo> mids) => [
+    ...mids.where((r) => !peers.isPublic(r)),
+    ...mids.where(peers.isPublic),
+  ];
 
   /// Sends [payload] to [last] over an onion path. If the first hop does not
   /// answer, the route is rebuilt with other peers.
@@ -1224,11 +1234,27 @@ class Messenger {
     List<RelayInfo>? used,
   }) async {
     final entryCands = peers.entryCandidates(exclude: [target.nodePk]);
-    final entry = await node.ensureEntry([...entryCands, target]);
+    var entry = await node.ensureEntry([...entryCands, target]);
     if (entry == null || node.hopFor(entry) == null) return null;
+    // Replies travel target -> middle hops -> entry -> us. From a relay on the
+    // internet they can only go on to public relays, so a private entry
+    // cannot serve a public target: move the entry to a public relay.
+    final targetPublic = peers.isPublic(target);
+    if (targetPublic && !peers.isPublic(entry)) {
+      final better = entryCands.where(peers.isPublic).toList();
+      if (better.isEmpty) return null;
+      node.dropEntry();
+      entry = await node.ensureEntry(better);
+      if (entry == null || node.hopFor(entry) == null || !peers.isPublic(entry)) return null;
+    }
+    final entryPublic = peers.isPublic(entry);
     final surbs = <Surb>[];
     for (var i = 0; i < n; i++) {
-      final mids = peers.pick(settings.hops - 1, exclude: [target.nodePk, entry.nodePk], usable: _hasKey);
+      final mids = _travelOrder(peers.pick(
+        settings.hops - 1,
+        exclude: [target.nodePk, entry.nodePk],
+        usable: (r) => _hasKey(r) && (targetPublic ? peers.isPublic(r) : (entryPublic || !peers.isPublic(r))),
+      ));
       final hops = [
         for (final m in mids) node.hopFor(m, delayMs: _hopDelay())!,
         node.hopFor(entry, delayMs: _hopDelay())!,

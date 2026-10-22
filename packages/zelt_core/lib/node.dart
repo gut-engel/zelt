@@ -236,7 +236,12 @@ class Node {
     }
   }
 
+  /// Test hook: simulates network reachability (false = cannot connect).
+  bool Function(RelayInfo r)? canDial;
+
   Future<Link> _link(RelayInfo r) {
+    final dial = canDial;
+    if (dial != null && !dial(r)) return Future.error(SocketException('unreachable (test)'));
     final k = r.key;
     final existing = _out[k];
     if (existing != null) {
@@ -650,6 +655,15 @@ class Node {
   // --- Client ----------------------------------------------------------
 
   bool get hasEntry => _entryLink != null && !_entryLink!.isClosed;
+
+  /// Forgets the entry relay so the next [ensureEntry] picks a better one.
+  /// The connection itself stays (it may carry other traffic).
+  void dropEntry() {
+    if (_entryLink == null) return;
+    _entryLink = null;
+    entry = null;
+    onEntryChanged?.call();
+  }
 
   /// Keeps one registered connection to an entry relay; SURB replies come
   /// back through it.
