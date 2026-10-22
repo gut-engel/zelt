@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'address.dart';
 import 'bytes.dart';
 import 'constants.dart';
+import 'onion.dart';
 import 'sphinx.dart';
 import 'tokens.dart';
 
@@ -167,6 +168,11 @@ class ReplyMsg {
   final Credential? credential;
   final List<RelayInfo> nodes;
 
+  /// Onion-key certificates for [nodes] (DHT replies), so they can be hops.
+  final List<OnionKeyCert> certs;
+
+  static const maxNodeCerts = 16;
+
   ReplyMsg(
     this.type, {
     this.last = true,
@@ -175,6 +181,7 @@ class ReplyMsg {
     this.blob,
     this.credential,
     this.nodes = const [],
+    this.certs = const [],
   });
 
   Uint8List encode() {
@@ -196,6 +203,11 @@ class ReplyMsg {
         w.u8(nodes.length);
         for (final n in nodes) {
           w.bytes(n.encode());
+        }
+        final cs = certs.take(maxNodeCerts).toList();
+        w.u8(cs.length);
+        for (final c in cs) {
+          w.bytes(c.encode());
         }
     }
     return w.toPadded(payloadSize);
@@ -230,14 +242,17 @@ class ReplyMsg {
         );
       case Reply.nodes:
         final n = r.u8();
+        final nodes = [
+          for (var i = 0; i < n; i++) RelayInfo.decode(r.bytes(RelayInfo.encodedSize)),
+        ];
+        final m = r.u8();
+        if (m > maxNodeCerts) throw const FormatException('too many certs');
         return ReplyMsg(
           type,
           last: last,
           partners: partners,
-          nodes: [
-            for (var i = 0; i < n; i++)
-              RelayInfo.decode(r.bytes(RelayInfo.encodedSize)),
-          ],
+          nodes: nodes,
+          certs: [for (var i = 0; i < m; i++) OnionKeyCert.decode(r)],
         );
       default:
         throw const FormatException('unknown reply');

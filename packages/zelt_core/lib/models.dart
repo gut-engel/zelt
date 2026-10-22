@@ -339,26 +339,32 @@ class SeenEntry {
 
 /// Keys generated once per install.
 class Identity {
+  /// The user's identity (X25519), only ever shared inside pairing codes.
   final KeyPair25519 id;
-  final KeyPair25519 node;
+
+  /// This install's relay identity (Ed25519): authenticates links and signs
+  /// onion-key certificates. Never used for onion layers.
+  final SigningKey node;
   final Uint8List relaySecret;
   Identity(this.id, this.node, this.relaySecret);
 
   static Future<Identity> generate() async => Identity(
     await Crypto.x25519Generate(),
-    await Crypto.x25519Generate(),
+    await Crypto.ed25519Generate(),
     randomBytes(32),
   );
 
   Map<String, dynamic> toJson() => {
     'id': id.toJson(),
-    'node': node.toJson(),
+    'relayId': node.toJson(),
     'rs': b64(relaySecret),
   };
 
-  factory Identity.fromJson(Map<String, dynamic> j) => Identity(
+  /// Loads saved keys. Installs from protocol v1 had an X25519 node key that
+  /// served both links and onions; they get a fresh Ed25519 relay identity.
+  static Future<Identity> load(Map<String, dynamic> j) async => Identity(
     KeyPair25519.fromJson(j['id']),
-    KeyPair25519.fromJson(j['node']),
+    j['relayId'] != null ? SigningKey.fromJson(j['relayId']) : await Crypto.ed25519Generate(),
     unb64(j['rs']),
   );
 }

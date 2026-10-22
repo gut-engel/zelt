@@ -139,7 +139,7 @@ void main() {
     expect(batches.every((b) => b.length <= fetchMaxIds), isTrue);
     expect([for (final b in batches) ...b.map(hex)], [for (final i in ids) hex(i)]);
     final k = await Crypto.x25519Generate();
-    final hop = Hop(RelayInfo(NodeAddr(InternetAddress.loopbackIPv4, 1), k.pub));
+    final hop = Hop(RelayInfo(NodeAddr(InternetAddress.loopbackIPv4, 1), randomBytes(32)), k.pub, 1);
     final surbs = [for (var i = 0; i < fetchSurbs; i++) (await Sphinx.surb([hop, hop, hop, hop], randomBytes(8))).$1];
     for (final b in batches) {
       final encoded = FetchCmd(surbs, b).encode(); // throws if it overflowed
@@ -234,7 +234,17 @@ void main() {
 
   test('identity json round trip', () async {
     final i = await Identity.generate();
-    final j = Identity.fromJson(i.toJson());
+    final j = await Identity.load(i.toJson());
     expect(j.id.pub, i.id.pub);
+    expect(j.node.pub, i.node.pub);
+  });
+
+  test('a v1 identity (X25519 node key) migrates to a new Ed25519 relay identity', () async {
+    final i = await Identity.generate();
+    final v1 = {'id': i.id.toJson(), 'node': (await Crypto.x25519Generate()).toJson(), 'rs': b64(i.relaySecret)};
+    final j = await Identity.load(v1);
+    expect(j.id.pub, i.id.pub);
+    expect(j.node.pub.length, 32);
+    expect(await Crypto.ed25519Verify(j.node.pub, [1, 2, 3], await Crypto.ed25519Sign(j.node, [1, 2, 3])), isTrue);
   });
 }

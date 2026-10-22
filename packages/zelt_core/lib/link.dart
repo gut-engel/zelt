@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -6,6 +7,7 @@ import 'address.dart';
 import 'bytes.dart';
 import 'constants.dart';
 import 'crypto.dart';
+import 'onion.dart';
 
 /// The other side speaks a different protocol version.
 class IncompatiblePeer implements Exception {
@@ -24,7 +26,11 @@ Uint8List get _preamble => Uint8List.fromList([..._magic, protocolVersion]);
 int? _versionOf(Uint8List preamble) =>
     bytesEqual(preamble.sublist(0, 3), _magic) ? preamble[3] : null;
 
-enum FrameType { packet, register, clientDelivery, announce, ping, pong, pad }
+/// onionKeys: a relay pushes its current onion-key certificates (on connect
+/// and after every rotation): count(1) + up to [maxCertsPerFrame] certs.
+enum FrameType { packet, register, clientDelivery, announce, ping, pong, pad, onionKeys }
+
+const int maxCertsPerFrame = 4;
 
 class Frame {
   final FrameType type;
@@ -42,13 +48,15 @@ class Frame {
 
 /// An encrypted, server-authenticated TCP link between two nodes.
 ///
-/// Handshake: both sides first send "ZLT" + protocol version; a mismatch ends
-/// the connection with [IncompatiblePeer]. Then the client sends an ephemeral
-/// X25519 key and the server answers with its own. Keys come from
-/// DH(ce, server static) and DH(ce, se), with the version bound into the salt,
-/// so only the holder of the node key named in the [RelayInfo] can read the
-/// link and nobody can force a downgrade.
-/// The client stays anonymous. Every frame has the same size on the wire.
+/// Handshake (v2): both sides send "ZLT" + protocol version; a mismatch ends
+/// the connection with [IncompatiblePeer]. The client sends an ephemeral
+/// X25519 key `ce`; the server answers with its own `se` and an Ed25519
+/// signature by its long-term identity over the transcript:
+///   sig = Sign(identity, "zelt/link/v2" ‖ preamble ‖ ce ‖ se ‖ identityPk)
+/// Keys = HKDF(DH(ce, se), salt = preamble ‖ ce ‖ se ‖ identityPk). Only the
+/// holder of the identity named in the [RelayInfo] can complete it, both key
+/// shares are ephemeral (forward secrecy), the client stays anonymous, and the
+/// identity key is never used for onion layers. Every frame has the same size.
 class Link {
   final Socket _socket;
   final Uint8List _txKey;
@@ -82,16 +90,13 @@ class Link {
     return n;
   }
 
-  static Future<(Uint8List, Uint8List)> _keys(
-    Uint8List es,
-    Uint8List ee,
-    Uint8List ce,
-    Uint8List se,
-    Uint8List sk,
-  ) async {
+  static Uint8List _transcript(Uint8List ce, Uint8List se, Uint8List identityPk) =>
+      concat([utf8.encode('zelt/link/v$protocolVersion'), _preamble, ce, se, identityPk]);
+
+  static Future<(Uint8List, Uint8List)> _keys(Uint8List ee, Uint8List ce, Uint8List se, Uint8List identityPk) async {
     final k = await Crypto.hkdf(
-      concat([es, ee]),
-      salt: concat([_preamble, ce, se, sk]),
+      ee,
+      salt: concat([_preamble, ce, se, identityPk]),
       info: 'zelt/link/v$protocolVersion',
       length: 64,
     );
@@ -109,14 +114,15 @@ class Link {
       final ce = await Crypto.x25519Generate();
       s.add(concat([_preamble, ce.pub]));
       final reader = _SocketReader(s);
-      final pre = await reader.read(4).timeout(timeout);
-      final v = _versionOf(pre);
+      final v = _versionOf(await reader.read(4).timeout(timeout));
       if (v != protocolVersion) throw IncompatiblePeer(v);
       final se = await reader.read(32).timeout(timeout);
+      final sig = await reader.read(64).timeout(timeout);
+      if (!await Crypto.ed25519Verify(r.nodePk, _transcript(ce.pub, se, r.nodePk), sig)) {
+        throw const SocketException('relay failed to prove its identity');
+      }
       final rest = reader.detach();
-      final es = await Crypto.x25519(ce, r.nodePk);
-      final ee = await Crypto.x25519(ce, se);
-      final (c2s, s2c) = await _keys(es, ee, ce.pub, se, r.nodePk);
+      final (c2s, s2c) = await _keys(await Crypto.x25519(ce, se), ce.pub, se, r.nodePk);
       return Link._(s, c2s, s2c, true, rest);
     } catch (_) {
       s.destroy();
@@ -126,15 +132,14 @@ class Link {
 
   static Future<Link> accept(
     Socket s,
-    KeyPair25519 nodeKey, {
+    SigningKey identity, {
     Duration timeout = const Duration(seconds: 5),
   }) async {
     s.done.catchError((_) {}).ignore();
     try {
       s.setOption(SocketOption.tcpNoDelay, true);
       final reader = _SocketReader(s);
-      final pre = await reader.read(4).timeout(timeout);
-      final v = _versionOf(pre);
+      final v = _versionOf(await reader.read(4).timeout(timeout));
       if (v != protocolVersion) {
         // Tell a zelt peer of another version what we speak, then hang up.
         if (v != null) s.add(_preamble);
@@ -144,10 +149,9 @@ class Link {
       final ce = await reader.read(32).timeout(timeout);
       final rest = reader.detach();
       final se = await Crypto.x25519Generate();
-      s.add(concat([_preamble, se.pub]));
-      final es = await Crypto.x25519(nodeKey, ce);
-      final ee = await Crypto.x25519(se, ce);
-      final (c2s, s2c) = await _keys(es, ee, ce, se.pub, nodeKey.pub);
+      final sig = await Crypto.ed25519Sign(identity, _transcript(ce, se.pub, identity.pub));
+      s.add(concat([_preamble, se.pub, sig]));
+      final (c2s, s2c) = await _keys(await Crypto.x25519(se, ce), ce, se.pub, identity.pub);
       return Link._(s, s2c, c2s, false, rest);
     } catch (_) {
       s.destroy();
@@ -200,6 +204,7 @@ class Link {
     FrameType.clientDelivery => 8 + payloadSize,
     FrameType.announce => RelayInfo.encodedSize,
     FrameType.ping || FrameType.pong || FrameType.pad => 0,
+    FrameType.onionKeys => 1 + maxCertsPerFrame * OnionKeyCert.encodedSize,
   };
 
   Future<void> send(Frame f) {

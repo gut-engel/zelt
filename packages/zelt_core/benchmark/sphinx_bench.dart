@@ -5,13 +5,14 @@ import 'dart:typed_data';
 import 'package:zelt_core/address.dart';
 import 'package:zelt_core/constants.dart';
 import 'package:zelt_core/crypto.dart';
+import 'package:zelt_core/onion.dart';
 import 'package:zelt_core/sphinx.dart';
 
 Future<void> main() async {
   final keys = [for (var i = 0; i < 4; i++) await Crypto.x25519Generate()];
   final hops = [
     for (var i = 0; i < 4; i++)
-      Hop(RelayInfo(NodeAddr(InternetAddress.loopbackIPv4, 9000 + i), keys[i].pub)),
+      Hop(RelayInfo(NodeAddr(InternetAddress.loopbackIPv4, 9000 + i), keys[i].pub), keys[i].pub, i),
   ];
   final payload = Uint8List(payloadSize);
   // Warm up the worker and JIT/AOT caches.

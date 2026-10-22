@@ -13,6 +13,7 @@ import 'envelope.dart';
 import 'messages.dart';
 import 'models.dart';
 import 'node.dart';
+import 'onion.dart';
 import 'pairing.dart';
 import 'peers.dart';
 import 'protocol.dart';
@@ -137,7 +138,7 @@ class Messenger {
     InternetAddress? bindAddress,
     bool advertiseLoopback = false,
   }) : node = Node(
-         key: identity.node,
+         identity: identity.node,
          relaySecret: identity.relaySecret,
          port: settings.port,
          bindAddress: bindAddress,
@@ -149,6 +150,7 @@ class Messenger {
     node.handoffPartners = _handoffPartners;
     node.onAnnounce = (r) {};
     node.onStored = _onLocalStore;
+    node.onCerts = _onCerts;
     node.onLog = log;
   }
 
@@ -203,9 +205,23 @@ class Messenger {
     'mailboxes': [for (final m in mailboxes.values) m.toJson()],
     'nextSlot': nextSlot,
     'advertised': _advertised.toList(),
+    'certs': node.certs.toJson(),
     'peers': peers.toJson(),
   };
 
+  /// Restores a saved messenger (migrating older saved formats).
+  static Future<Messenger> load(
+    Map<String, dynamic> j, {
+    Timings timings = const Timings(),
+    InternetAddress? bindAddress,
+    bool advertiseLoopback = false,
+  }) async {
+    final copy = Map<String, dynamic>.of(j);
+    copy['identity'] = (await Identity.load(j['identity'])).toJson();
+    return fromJson(copy, timings: timings, bindAddress: bindAddress, advertiseLoopback: advertiseLoopback);
+  }
+
+  /// Restores a messenger saved in the current format.
   static Messenger fromJson(
     Map<String, dynamic> j, {
     Timings timings = const Timings(),
@@ -213,7 +229,11 @@ class Messenger {
     bool advertiseLoopback = false,
   }) {
     final m = Messenger(
-      identity: Identity.fromJson(j['identity']),
+      identity: Identity(
+        KeyPair25519.fromJson(j['identity']['id']),
+        SigningKey.fromJson(j['identity']['relayId']),
+        unb64(j['identity']['rs']),
+      ),
       settings: Settings.fromJson(j['settings']),
       timings: timings,
       bindAddress: bindAddress,
@@ -234,6 +254,7 @@ class Messenger {
     }
     m.nextSlot = j['nextSlot'] ?? 1;
     m._advertised = {...(j['advertised'] as List? ?? []).cast<String>()};
+    m.node.certs.loadJson(j['certs'] as List? ?? []);
     if (j['peers'] != null) m.peers.loadJson(j['peers']);
     return m;
   }
@@ -393,6 +414,10 @@ class Messenger {
     // so a contact cannot hand us their friends' relays as peers.
     c.theirMailboxes.addAll(theirs.grants.where((g) => _usableAddr(g.relay)));
     peers.refresh(minRequired: settings.hops);
+    // Their relays push onion-key certificates when we connect.
+    for (final r in theirs.relays) {
+      unawaited(node.ping(r));
+    }
     log('paired with ${c.name} (${keys.initiator ? 'initiator' : 'responder'})');
     await _refreshMailboxes();
     _changed();
@@ -544,8 +569,20 @@ class Messenger {
               .where((r) => !c.theirRelays.any((t) => bytesEqual(t.nodePk, r.nodePk)))
               .toList()
         : <RelayInfo>[];
+    // Certificates: ours first, then the mailbox relays, then known relays.
+    final certs = <OnionKeyCert>[
+      ...node.keyring.certs,
+      for (final g in mbox) if (!node.isSelf(g.relay)) ...node.certs.of(g.relay.nodePk),
+      for (final r in known) ...node.certs.of(r.nodePk),
+    ];
     _sentRelaySig[c.id] = await _relaySig();
-    return AddressInfo(relays: relays, mailboxes: mbox, relayCreds: creds, known: known);
+    return AddressInfo(
+      relays: relays,
+      mailboxes: mbox,
+      relayCreds: creds,
+      known: known,
+      certs: certs.take(AddressInfo.maxCerts).toList(),
+    );
   }
 
   Future<void> _applyInfo(Contact c, AddressInfo info) async {
@@ -556,6 +593,7 @@ class Messenger {
     for (final r in info.known) {
       if (!node.isSelf(r)) peers.add(r, 'via:${c.id}');
     }
+    await node.addCerts(info.certs);
     for (final g in info.mailboxes) {
       if (!_usableAddr(g.relay)) continue;
       final dup = c.theirMailboxes.any(
@@ -815,25 +853,36 @@ class Messenger {
     DelayMode.paranoid => 6000,
   };
 
+  bool _hasKey(RelayInfo r) => node.hopFor(r) != null;
+
   /// Middle hops are fresh random peers for every packet; [last] is the
-  /// destination relay.
-  List<Hop> _route(RelayInfo last, {Iterable<Uint8List> exclude = const []}) {
-    final mids = peers.pick(settings.hops - 1, exclude: [last.nodePk, identity.node.pub, ...exclude]);
+  /// destination relay. Only relays with a valid onion-key certificate can
+  /// be hops; null if [last] has none.
+  List<Hop>? _route(RelayInfo last, {Iterable<Uint8List> exclude = const []}) {
+    final end = node.hopFor(last, delayMs: _hopDelay());
+    if (end == null) return null;
+    final mids = peers.pick(
+      settings.hops - 1,
+      exclude: [last.nodePk, identity.node.pub, ...exclude],
+      usable: _hasKey,
+    );
     return [
-      for (final m in mids) Hop(m, delayMs: _hopDelay()),
-      Hop(last, delayMs: _hopDelay()),
+      for (final m in mids) node.hopFor(m, delayMs: _hopDelay())!,
+      end,
     ];
   }
 
   /// Sends [payload] to [last] over an onion path. If the first hop does not
   /// answer, the route is rebuilt with other peers.
-  Future<bool> _sendOnion(RelayInfo last, Uint8List payload) async {
+  Future<bool> _sendOnion(RelayInfo last, Uint8List payload, {List<RelayInfo>? used}) async {
     if (node.isSelf(last)) {
       // Our own relay: nobody to hide from, deliver locally. The relay may stop
       // while the packet is being built, so this can fail like any send.
       if (!node.relayRunning) return false;
       try {
-        await node.sendPacket(last, await Sphinx.forward([Hop(last)], payload));
+        final hop = node.hopFor(last);
+        if (hop == null) return false;
+        await node.sendPacket(last, await Sphinx.forward([hop], payload));
         return true;
       } catch (_) {
         return false;
@@ -842,9 +891,14 @@ class Messenger {
     final tried = <Uint8List>[];
     for (var attempt = 0; attempt < 3; attempt++) {
       final hops = _route(last, exclude: tried);
+      if (hops == null) {
+        log('no valid onion key for ${last.addr} yet');
+        return false;
+      }
       final pkt = await Sphinx.forward(hops, payload);
       try {
         await _transmit(hops.first.relay, pkt);
+        used?.addAll(hops.map((h) => h.relay));
         return true;
       } catch (_) {
         tried.add(hops.first.relay.nodePk);
@@ -910,10 +964,11 @@ class Messenger {
   }
 
   Future<void> _sendDummy() async {
-    final targets = peers.activeRelays;
+    final targets = peers.activeRelays.where(_hasKey).toList();
     if (targets.isEmpty) return;
     final last = targets[_rng.nextInt(targets.length)];
     final hops = _route(last);
+    if (hops == null) return;
     try {
       await node.sendPacket(hops.first.relay, await Sphinx.forward(hops, dropCmd()));
     } catch (_) {}
@@ -934,31 +989,57 @@ class Messenger {
     final entryCands = peers.entryCandidates(exclude: [target.nodePk]);
     final entry = await node.ensureEntry([...entryCands, target]);
     if (entry == null) return [];
+    final entryHop = node.hopFor(entry);
+    if (entryHop == null) return [];
     final replies = <ReplyMsg>[];
     final done = Completer<void>();
     final surbs = <Surb>[];
+    final used = <RelayInfo>[];
     for (var i = 0; i < nSurbs; i++) {
-      final mids = peers.pick(settings.hops - 1, exclude: [target.nodePk, entry.nodePk]);
+      final mids = peers.pick(settings.hops - 1, exclude: [target.nodePk, entry.nodePk], usable: _hasKey);
       final hops = [
-        for (final m in mids) Hop(m, delayMs: _hopDelay()),
-        Hop(entry, delayMs: _hopDelay()),
+        for (final m in mids) node.hopFor(m, delayMs: _hopDelay())!,
+        node.hopFor(entry, delayMs: _hopDelay())!,
       ];
+      used.addAll(hops.map((h) => h.relay));
       surbs.add(await node.makeSurb(hops, (r) {
         replies.add(r);
         if ((r.last || replies.length >= nSurbs) && !done.isCompleted) done.complete();
       }, ttl: _requestTimeout * 2));
     }
-    final ok = await _sendOnion(target, build(surbs));
+    final ok = await _sendOnion(target, build(surbs), used: used);
     if (!ok) return [];
     try {
       await done.future.timeout(_requestTimeout);
     } on TimeoutException {
       // Return whatever arrived.
     }
+    if (replies.isEmpty) {
+      // One of these relays may have restarted with new onion keys: have
+      // maintenance re-confirm their keys directly.
+      for (final r in used) {
+        node.certs.confirmed.remove(r.id);
+      }
+    }
     return replies;
   }
 
   // --- Receiving -------------------------------------------------------
+
+  DateTime _lastCertKick = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// New onion keys can unblock pending handshakes and queued messages.
+  void _onCerts() {
+    if (!_started) return;
+    final now = DateTime.now();
+    if (now.difference(_lastCertKick) < const Duration(seconds: 2)) return;
+    _lastCertKick = now;
+    for (final c in contacts.values.where(_needsHello)) {
+      unawaited(_handshakeTick(c, force: true));
+    }
+    unawaited(_retryDue());
+    _changed();
+  }
 
   /// A blob landed on our own relay. If it is for one of our mailboxes, take
   /// it right away instead of waiting for the next poll.
@@ -1260,6 +1341,16 @@ class Messenger {
       for (final r in peers.toProbe(4)) {
         unawaited(node.ping(r));
       }
+      // Re-confirm onion keys of a couple of peers we have not heard from
+      // directly for a while (catches relays that restarted unseen).
+      final stale = peers.activeRelays.where((r) {
+        final t = node.certs.confirmed[r.id];
+        return t == null || now.difference(t) > const Duration(minutes: 10);
+      }).toList()
+        ..shuffle(_rng);
+      for (final r in stale.take(2)) {
+        unawaited(node.ping(r));
+      }
     } catch (e) {
       log('maintenance: $e');
     } finally {
@@ -1359,6 +1450,7 @@ class Messenger {
       var found = 0;
       for (final replies in results) {
         for (final r in replies) {
+          await node.addCerts(r.certs);
           for (final n in r.nodes) {
             if (node.isSelf(n)) continue;
             if (!peers.known.containsKey(n.key)) found++;

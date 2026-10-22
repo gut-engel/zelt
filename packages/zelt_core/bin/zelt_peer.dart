@@ -47,8 +47,7 @@ Future<void> main(List<String> args) async {
 
   final relays = <Node>[];
   for (var i = 1; i <= (localRelays ? 3 : 0); i++) {
-    final k = await Crypto.x25519Generate();
-    final n = Node(key: k, relaySecret: randomBytes(32), port: basePort + i, bindAddress: lo);
+    final n = Node(identity: await Crypto.ed25519Generate(), relaySecret: randomBytes(32), port: basePort + i, bindAddress: lo);
     await n.start(relay: true);
     relays.add(n);
   }
@@ -56,7 +55,7 @@ Future<void> main(List<String> args) async {
   final f = File(statePath);
   final Messenger m;
   if (f.existsSync()) {
-    m = Messenger.fromJson(jsonDecode(f.readAsStringSync()), bindAddress: lo);
+    m = await Messenger.load(jsonDecode(f.readAsStringSync()), bindAddress: lo);
   } else {
     m = Messenger(
       identity: await Identity.generate(),

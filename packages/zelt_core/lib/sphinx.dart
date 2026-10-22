@@ -5,11 +5,14 @@ import 'bytes.dart';
 import 'constants.dart';
 import 'crypto.dart';
 import 'lioness.dart';
+import 'onion.dart';
 import 'worker.dart';
 
 /// Sphinx-style onion packets.
 ///
-/// Packet = eph(32) | mac(16) | routing(R) | payload(P), always [packetSize].
+/// Packet = keyId(1) | eph(32) | mac(16) | routing(R) | payload(P), always
+/// [packetSize]. keyId names which of the hop's onion keys (see onion.dart)
+/// the layer is encrypted to.
 ///
 /// Each hop computes s = X25519(nodeKey, eph), checks the MAC over the
 /// routing info, decrypts (routing || 0^S) with a stream keyed from s and
@@ -31,11 +34,19 @@ import 'worker.dart';
 enum SlotCmd { relay, deliver, toClient }
 
 class Hop {
+  /// Where to send the packet and the identity the link must prove.
   final RelayInfo relay;
+
+  /// The relay's current onion key (from a verified [OnionKeyCert]).
+  final Uint8List onionPk;
+  final int keyId;
 
   /// How long this relay holds the packet before forwarding.
   final int delayMs;
-  Hop(this.relay, {this.delayMs = 0});
+  Hop(this.relay, this.onionPk, this.keyId, {this.delayMs = 0});
+
+  factory Hop.fromCert(RelayInfo relay, OnionKeyCert cert, {int delayMs = 0}) =>
+      Hop(relay, cert.onionPk, cert.keyId, delayMs: delayMs);
 }
 
 class _HopKeys {
@@ -168,7 +179,7 @@ class Sphinx {
     for (final h in hops) {
       final e = KeyPair25519.generateSync();
       ephs.add(e);
-      final k = _HopKeys.derive(CryptoSync.x25519(e, h.relay.nodePk));
+      final k = _HopKeys.derive(CryptoSync.x25519(e, h.onionPk));
       keys.add(k);
       streams.add(CryptoSync.keystream(k.header, routingSize + slotSize));
     }
@@ -199,7 +210,7 @@ class Sphinx {
       beta = plain;
       mac = CryptoSync.hmac(keys[i].mac, beta).sublist(0, 16);
     }
-    return (concat([ephs[0].pub, mac, beta]), keys);
+    return (concat([[hops[0].keyId], ephs[0].pub, mac, beta]), keys);
   }
 
   /// Builds a forward packet whose last hop receives [payload] in the clear.
@@ -219,14 +230,15 @@ class Sphinx {
           extra: digest.sublist(0, 16),
         );
       }
-      final next = hops[i + 1].relay;
+      final next = hops[i + 1];
       return Slot(
         SlotCmd.relay,
         delayMs: hops[i].delayMs,
-        nextAddr: next.addr,
-        nextPk: next.nodePk,
+        nextAddr: next.relay.addr,
+        nextPk: next.relay.nodePk,
         nextEph: eph,
         nextMac: mac,
+        extra: Uint8List(16)..[0] = next.keyId,
       );
     });
     // Hop i decrypts one layer, so wrap the innermost (last hop) first.
@@ -253,14 +265,15 @@ class Sphinx {
           extra: concat([cookie, id]),
         );
       }
-      final next = hops[i + 1].relay;
+      final next = hops[i + 1];
       return Slot(
         SlotCmd.relay,
         delayMs: hops[i].delayMs,
-        nextAddr: next.addr,
-        nextPk: next.nodePk,
+        nextAddr: next.relay.addr,
+        nextPk: next.relay.nodePk,
         nextEph: eph,
         nextMac: mac,
+        extra: Uint8List(16)..[0] = next.keyId,
       );
     });
     return (
@@ -282,9 +295,11 @@ class Sphinx {
     return body;
   }
 
-  /// Peels one layer with this node's key. Returns null if the packet is
-  /// invalid or a replay (see [ReplayFilter]). The crypto runs on the worker;
-  /// the replay check stays here.
+  /// Peels one layer with the onion key named by the packet's key ID
+  /// ([keyIdOf]). Returns null if the packet is invalid or a replay. The crypto
+  /// runs on the worker; the replay check stays here.
+  static int keyIdOf(Uint8List packet) => packet[0];
+
   static Future<Peeled?> peel(
     KeyPair25519 nodeKey,
     Uint8List packet,
@@ -299,9 +314,9 @@ class Sphinx {
 
   static (Peeled, Uint8List)? _peel(KeyPair25519 nodeKey, Uint8List packet) {
     if (packet.length != packetSize) return null;
-    final eph = Uint8List.sublistView(packet, 0, 32);
-    final mac = Uint8List.sublistView(packet, 32, 48);
-    final beta = Uint8List.sublistView(packet, 48, headerSize);
+    final eph = Uint8List.sublistView(packet, 1, 33);
+    final mac = Uint8List.sublistView(packet, 33, 49);
+    final beta = Uint8List.sublistView(packet, 49, headerSize);
     final Uint8List shared;
     try {
       shared = CryptoSync.x25519(nodeKey, eph);
@@ -326,7 +341,7 @@ class Sphinx {
 
     switch (slot.cmd) {
       case SlotCmd.relay:
-        final next = concat([slot.nextEph, slot.nextMac, Uint8List.sublistView(ext, slotSize)]);
+        final next = concat([[slot.extra[0]], slot.nextEph, slot.nextMac, Uint8List.sublistView(ext, slotSize)]);
         return (Peeled(slot, concat([next, payload]), payload), keys.replayTag);
       case SlotCmd.deliver:
         final d = CryptoSync.sha256(payload);
@@ -334,33 +349,6 @@ class Sphinx {
         return (Peeled(slot, null, payload), keys.replayTag);
       case SlotCmd.toClient:
         return (Peeled(slot, null, payload), keys.replayTag);
-    }
-  }
-}
-
-/// Remembers per-packet tags so a replayed packet is dropped, which stops an
-/// observer from replaying a packet to see where its copy goes.
-class ReplayFilter {
-  final Duration keep;
-  final Map<String, int> _seen = {};
-  ReplayFilter({this.keep = relayTtl});
-
-  bool checkAndAdd(Uint8List tag) {
-    final k = hex(tag);
-    final now = DateTime.now().millisecondsSinceEpoch;
-    if (_seen.containsKey(k)) return false;
-    _seen[k] = now;
-    if (_seen.length > 200000) prune();
-    return true;
-  }
-
-  void prune() {
-    final cutoff = DateTime.now().millisecondsSinceEpoch - keep.inMilliseconds;
-    _seen.removeWhere((_, t) => t < cutoff);
-    // Hard bound: drop the oldest half if still too large.
-    if (_seen.length > 200000) {
-      final keys = _seen.keys.take(_seen.length ~/ 2).toList();
-      keys.forEach(_seen.remove);
     }
   }
 }

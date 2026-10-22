@@ -38,8 +38,11 @@ No primitive is implemented in this repository.
 Each install generates:
 
 - **Identity key** (X25519). Only ever leaves the phone inside a pairing QR code.
-- **Node key** (X25519). The relay's onion key; published with its address. Never
-  linked to the identity on the wire.
+- **Relay identity** (Ed25519). Authenticates links and signs onion-key
+  certificates. It is published with the relay's address (`RelayInfo.nodePk`) and
+  never peels onions. It is unrelated to the user identity.
+- **Onion keys** (X25519, relays only). Rotating keys that exist only in RAM (see
+  Onion keys below).
 - **Relay secret** (32 bytes). Derives token credentials (see below).
 
 ## Pairing
@@ -133,13 +136,16 @@ Delete key: `HMAC(delKey, SHA-256(blob))`. The relay stores `SHA-256(deleteKey)`
 
 ## Onion packets
 
-Each packet is exactly 8192 bytes: `eph(32) mac(16) routing(7 × 120) payload(7304)`.
+Each packet is exactly 8192 bytes: `keyId(1) eph(32) mac(16) routing(7 × 120) payload(7303)`.
+`keyId` names which of the hop's onion keys the layer is encrypted to. For a
+`relay` slot, the next hop's key ID travels in `extra[0]`.
 
 Slot (120 bytes): `cmd(1) delayMs(u32) nextAddr(19) nextPk(32) nextEph(32) nextMac(16) extra(16)`.
 Commands are `relay`, `deliver` (run the payload command here) and `toClient`
 (`extra` = connection cookie ‖ SURB id).
 
-Each hop computes `s = X25519(nodeKey, eph)` and derives 208 bytes with
+Each hop looks up the onion key named by `keyId` (unknown or retired: drop),
+computes `s = X25519(onionKey, eph)` and derives 208 bytes with
 `HKDF(s, "zelt/sphinx/v2")`: a MAC key (32), a header stream key (32), LIONESS
 payload keys (128) and a replay tag (16). It checks the MAC over the routing info,
 rejects replayed tags, decrypts `routing ‖ 0^120`, reads its slot and decrypts
@@ -171,13 +177,54 @@ the encrypted routing info instead of being derived by blinding.
 TCP, with a server-authenticated handshake. Each side first sends a preamble,
 `"ZLT" ‖ protocolVersion(1)`. If the versions differ, the server answers with
 its own preamble and closes, and the client reports which version the peer runs.
-A v1 node sends no preamble and is refused the same way. Then the client sends
-an ephemeral X25519 key and the server answers with its own:
-`keys = HKDF(DH(ce, nodePk) ‖ DH(ce, se), salt = preamble ‖ ce ‖ se ‖ nodePk, info = "zelt/link/v2")`.
-The version is bound into the keys, so a downgrade cannot be forced. Only the
-holder of the advertised node key can read the link, and the client stays
-anonymous. Every frame is `AEAD(type(1) ‖ body padded to 8200)`, 8217 bytes on
-the wire.
+A v1 node sends no preamble and is refused the same way. Then:
+
+```
+client → server:  preamble ‖ ce                    (ephemeral X25519)
+server → client:  preamble ‖ se ‖ sig              (ephemeral X25519, Ed25519 signature)
+sig  = Ed25519(relay identity, "zelt/link/v2" ‖ preamble ‖ ce ‖ se ‖ identityPk)
+keys = HKDF(DH(ce, se), salt = preamble ‖ ce ‖ se ‖ identityPk, info = "zelt/link/v2")
+```
+
+Only the holder of the identity named in the `RelayInfo` can produce the
+signature. Both key shares are ephemeral, so the link has forward secrecy. The
+version is bound into the keys, so a downgrade cannot be forced, and the client
+stays anonymous. The identity key is never used for onion layers. Every frame is
+`AEAD(type(1) ‖ body padded to 8200)`, 8217 bytes on the wire. Right after the
+handshake, and after every rotation, the relay pushes its live onion-key
+certificates (`onionKeys` frame, up to 4).
+
+## Onion keys
+
+Every relay has rotating X25519 onion keys, created at random and **kept only in
+RAM**. Each is published in a certificate signed by the relay identity:
+
+```
+cert = relayPk(32) keyId(1) onionPk(32) validFrom(u32) validUntil(u32) sig(64)     (times in unix minutes)
+sig  = Ed25519(identity, "zelt/onion-key/v2" ‖ relayPk ‖ keyId ‖ onionPk ‖ validFrom ‖ validUntil)
+```
+
+- **Lifetime:** 24 h, plus a 2 h overlap. The next key is published as soon as the
+  current one starts, so senders always have it in time. Senders stop using a key
+  10 minutes before it expires.
+- **Replay cache:** one per key, a fixed 4 MiB hash table holding the first 8
+  bytes of every replay tag. It never evicts, since eviction would allow replays
+  again. It holds at most 250,000 tags; when it is full, the key retires early
+  and a new one takes over. The cache disappears with its key at expiry, so at
+  most 2–3 live keys use about 12 MiB.
+- **Restart:** a restart creates fresh keys and forgets the old ones. A packet
+  recorded before the restart can neither be replayed to that relay nor peeled
+  by it later, even if its disk is seized (forward secrecy for routing).
+- **Distribution:** certificates reach senders through the link (from the relay
+  itself; this set replaces whatever the receiver stored for that relay),
+  through friends' updates (`AddressInfo.certs`, up to 20, for own, mailbox and
+  known relays) and through DHT replies. Second-hand certificates are verified
+  against the identity they name.
+- **Transition:** senders use only relays with a valid certificate. A sender
+  holding stale keys for a restarted relay gets no reply. It then marks that
+  relay's keys unconfirmed and re-checks them directly. A dropped link is also
+  re-opened after a random 0.5–3 s, and every peer's keys are re-confirmed at
+  least every 10 minutes. Expired keys are never used.
 
 ## Send tokens
 
@@ -202,7 +249,7 @@ cap is hit, the oldest blob in that scope goes first.
 ## Delivery
 
 1. The sender seals once and keeps the blob in its encrypted outbox.
-2. It picks up to 3 of the recipient's mailbox relays, distinct by node key, and
+2. It picks up to 3 of the recipient's mailbox relays, distinct by identity, and
    sends a byte-identical `store` to each over its own fresh onion path. Middle
    hops are random active peers, chosen anew for every packet. If the first hop
    does not answer, it rebuilds the route.
@@ -278,7 +325,8 @@ Cover traffic options:
   recipient is. IDs rotate daily.
 - A relay learns which of its operator's contacts' slots a token came from.
 - Spent-token sets live in RAM, so a relay restart lets an index be reused once.
-  The per-slot quotas still bound the damage.
+  The per-slot quotas still bound the damage. (Onion replay caches are also RAM
+  only, but a restart replaces the onion keys, so old packets cannot be replayed.)
 - On Android the network code runs in the app process, kept alive by a foreground
   service. If the system kills the process, relay data is lost by design, and the
   3-copy rule covers it.

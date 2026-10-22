@@ -9,6 +9,7 @@ import 'constants.dart';
 import 'crypto.dart';
 import 'dht.dart';
 import 'link.dart';
+import 'onion.dart';
 import 'protocol.dart';
 import 'relay_store.dart';
 import 'sphinx.dart';
@@ -28,6 +29,9 @@ class NodeStats {
   int packetsRelayed = 0;
   int blobsStored = 0;
   int fetchesServed = 0;
+
+  /// Packets dropped: unknown or retired onion key, bad MAC, or replay.
+  int packetsRejected = 0;
   int inboundLinks = 0;
   DateTime? lastInbound;
 }
@@ -35,10 +39,19 @@ class NodeStats {
 /// One zelt node: an onion relay with a RAM-only mailbox store (when relaying
 /// is on) and the client side that sends onions and receives SURB replies.
 class Node {
-  final KeyPair25519 key;
+  /// Long-term identity: authenticates links and signs onion-key certificates.
+  final SigningKey identity;
+
+  /// This relay's rotating onion keys (RAM only).
+  final OnionKeyring keyring;
+
+  /// Verified onion-key certificates of other relays.
+  final CertStore certs = CertStore();
+
+  /// New verified certificates arrived (from a link, gossip or the DHT).
+  void Function()? onCerts;
   final TokenIssuer issuer;
   final RelayStore store = RelayStore();
-  final ReplayFilter replay = ReplayFilter();
   final DhtTable dht;
   final NodeStats stats = NodeStats();
 
@@ -80,13 +93,14 @@ class Node {
   void Function(String msg)? onLog;
 
   Node({
-    required this.key,
+    required this.identity,
     required Uint8List relaySecret,
     this.port = defaultPort,
     InternetAddress? bindAddress,
     this.advertiseLoopback = false,
   }) : issuer = TokenIssuer(relaySecret),
-       dht = DhtTable(key.pub),
+       keyring = OnionKeyring(identity),
+       dht = DhtTable(identity.pub),
        bindAddress = bindAddress ?? InternetAddress.anyIPv6;
 
   bool get relayEnabled => _relayEnabled;
@@ -95,7 +109,14 @@ class Node {
   void _log(String m) => onLog?.call(m);
 
   Future<void> start({required bool relay}) async {
+    _stopping = false;
     _janitor ??= Timer.periodic(const Duration(seconds: 30), (_) => _cleanup());
+    keyring.onRotate = () {
+      for (final l in _inbound.toList()) {
+        unawaited(_sendCerts(l));
+      }
+    };
+    await keyring.maintain();
     await setRelay(relay);
   }
 
@@ -119,17 +140,22 @@ class Node {
     } else if (!on && _server != null) {
       await _server!.close();
       _server = null;
-      for (final l in _clients.values) {
+      // Relaying off means off: drop every connection peers opened to us.
+      for (final l in [..._inbound, ..._clients.values]) {
         l.close();
       }
+      _inbound.clear();
       _clients.clear();
     }
   }
 
   Future<void> stop() async {
+    _stopping = true;
     _janitor?.cancel();
     _janitor = null;
     await setRelay(false);
+    // Onion keys never outlive the process run that made them.
+    keyring.wipe();
     for (final f in _out.values) {
       f.then((l) => l.close()).ignore();
     }
@@ -143,7 +169,7 @@ class Node {
   Future<List<RelayInfo>> localRelayInfos() async {
     if (_server == null) return [];
     if (bindAddress.isLoopback) {
-      return [RelayInfo(NodeAddr(bindAddress, port), key.pub)];
+      return [RelayInfo(NodeAddr(bindAddress, port), identity.pub)];
     }
     final out = <RelayInfo>[];
     try {
@@ -156,14 +182,14 @@ class Node {
           if (a.isLinkLocal) continue;
           if (a.isLoopback && !advertiseLoopback) continue;
           if (a.type == InternetAddressType.IPv6 && _isUlaOrTemp(a)) continue;
-          out.add(RelayInfo(NodeAddr(a, port), key.pub));
+          out.add(RelayInfo(NodeAddr(a, port), identity.pub));
         }
       }
     } catch (e) {
       _log('interface list failed: $e');
     }
     if (advertiseLoopback && !out.any((r) => r.addr.isLoopback)) {
-      out.add(RelayInfo(NodeAddr(InternetAddress.loopbackIPv4, port), key.pub));
+      out.add(RelayInfo(NodeAddr(InternetAddress.loopbackIPv4, port), identity.pub));
     }
     // IPv4 first: on a shared LAN it is the address most likely to work.
     out.sort((a, b) => (a.addr.isV6 ? 1 : 0) - (b.addr.isV6 ? 1 : 0));
@@ -172,18 +198,23 @@ class Node {
 
   static bool _isUlaOrTemp(InternetAddress a) => (a.rawAddress[0] & 0xfe) == 0xfc;
 
-  bool isSelf(RelayInfo r) => bytesEqual(r.nodePk, key.pub);
+  bool isSelf(RelayInfo r) => bytesEqual(r.nodePk, identity.pub);
 
   // --- Links -----------------------------------------------------------
 
   Future<void> _accept(Socket s) async {
     try {
-      final link = (await Link.accept(s, key)).start();
+      final link = (await Link.accept(s, identity)).start();
+      _inbound.add(link);
+      unawaited(_sendCerts(link));
       stats.inboundLinks++;
       stats.lastInbound = DateTime.now();
       link.frames.listen(
         (f) => _onServerFrame(link, f),
-        onDone: () => _clients.removeWhere((_, l) => identical(l, link)),
+        onDone: () {
+          _clients.removeWhere((_, l) => identical(l, link));
+          _inbound.remove(link);
+        },
       );
     } catch (e) {
       _log('accept failed: $e');
@@ -203,12 +234,19 @@ class Node {
     final f = Link.connect(r).then((l) {
       l.start();
       l.frames.listen(
-        (fr) => _onClientFrame(l, fr),
+        (fr) => _onClientFrame(l, fr, r),
         onDone: () {
           _out.remove(k);
           if (identical(l, _entryLink)) {
             _entryLink = null;
             entry = null;
+          }
+          // The relay may have restarted with new onion keys: reconnect soon
+          // (jittered) so it pushes its current set. Idle closes are ours.
+          if (!_stopping && !_idleClosed.remove(l)) {
+            Timer(Duration(milliseconds: 500 + randomInt(2500)), () {
+              if (!_stopping) unawaited(ping(r));
+            });
           }
         },
       );
@@ -240,8 +278,10 @@ class Node {
     }
   }
 
-  void _onClientFrame(Link link, Frame f) {
+  void _onClientFrame(Link link, Frame f, RelayInfo from) {
     switch (f.type) {
+      case FrameType.onionKeys:
+        unawaited(_storeCerts(f.body, from));
       case FrameType.clientDelivery:
         _onDelivery(f.body.sublist(0, 8), Uint8List.fromList(f.body.sublist(8)));
       case FrameType.pong:
@@ -251,6 +291,49 @@ class Node {
       default:
         break;
     }
+  }
+
+  final Set<Link> _inbound = {};
+  final Set<Link> _idleClosed = {};
+  bool _stopping = false;
+
+  Future<void> _sendCerts(Link l) async {
+    final cs = keyring.certs.take(maxCertsPerFrame).toList();
+    if (cs.isEmpty) return;
+    final w = ByteWriter()..u8(cs.length);
+    for (final c in cs) {
+      w.bytes(c.encode());
+    }
+    try {
+      await l.send(Frame(FrameType.onionKeys, w.toPadded(1 + maxCertsPerFrame * OnionKeyCert.encodedSize)));
+    } catch (_) {}
+  }
+
+  /// Certificates pushed by a relay we are connected to; only accepted for
+  /// that relay's own identity.
+  Future<void> _storeCerts(Uint8List body, RelayInfo from) async {
+    try {
+      final r = ByteReader(body);
+      final list = [for (var i = r.u8().clamp(0, maxCertsPerFrame); i > 0; i--) OnionKeyCert.decode(r)];
+      if (await certs.replaceFor(from.nodePk, list)) onCerts?.call();
+    } catch (_) {}
+  }
+
+  /// Adds certificates learned second-hand (gossip, DHT); each is verified
+  /// against the identity it names.
+  Future<void> addCerts(Iterable<OnionKeyCert> cs) async {
+    var added = false;
+    for (final c in cs) {
+      added |= await certs.add(c);
+    }
+    if (added) onCerts?.call();
+  }
+
+  /// A hop through [r] using its newest usable onion key, or null if none is
+  /// known. Our own relay uses its live key directly.
+  Hop? hopFor(RelayInfo r, {int delayMs = 0}) {
+    final c = isSelf(r) ? keyring.currentCert : certs.best(r.nodePk);
+    return c == null ? null : Hop.fromCert(r, c, delayMs: delayMs);
   }
 
   /// Checks that a relay is reachable and holds its node key.
@@ -301,8 +384,17 @@ class Node {
   // --- Relay -----------------------------------------------------------
 
   Future<void> _process(Uint8List packet) async {
-    final p = await Sphinx.peel(key, packet, replay);
-    if (p == null) return;
+    final live = keyring.lookup(Sphinx.keyIdOf(packet));
+    if (live == null) {
+      stats.packetsRejected++; // unknown or retired onion key
+      return;
+    }
+    final (onionKey, replay) = live;
+    final p = await Sphinx.peel(onionKey, packet, replay);
+    if (p == null) {
+      stats.packetsRejected++;
+      return;
+    }
     switch (p.slot.cmd) {
       case SlotCmd.relay:
         stats.packetsRelayed++;
@@ -382,7 +474,15 @@ class Node {
         case Cmd.dhtFind:
           final surb = Surb.decode(r.bytes(Surb.encodedSize));
           final target = r.bytes(32);
-          await _reply(surb, ReplyMsg(Reply.nodes, nodes: dht.closest(target)));
+          final nodes = dht.closest(target);
+          await _reply(
+            surb,
+            ReplyMsg(
+              Reply.nodes,
+              nodes: nodes,
+              certs: [for (final n in nodes) ...certs.of(n.nodePk)].take(ReplyMsg.maxNodeCerts).toList(),
+            ),
+          );
         case Cmd.handoff:
           if (!_relayEnabled) return;
           final c = HandoffCmd.decode(r);
@@ -435,6 +535,7 @@ class Node {
       blob: msg.blob,
       credential: msg.credential,
       nodes: msg.nodes,
+      certs: msg.certs,
     );
     try {
       await sendPacket(surb.firstHop, surb.packetWith(withPartners.encode()));
@@ -499,11 +600,13 @@ class Node {
     final now = DateTime.now();
     _surbs.removeWhere((_, p) => p.expires.isBefore(now));
     store.expire();
-    replay.prune();
+    unawaited(keyring.maintain());
+    certs.prune();
     for (final e in _out.entries.toList()) {
       e.value.then((l) {
         if (identical(l, _entryLink)) return;
         if (now.difference(l.lastActivity) > const Duration(minutes: 2)) {
+          _idleClosed.add(l);
           l.close();
           _out.remove(e.key);
         }

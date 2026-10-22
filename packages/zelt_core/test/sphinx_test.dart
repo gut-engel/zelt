@@ -6,6 +6,7 @@ import 'package:zelt_core/address.dart';
 import 'package:zelt_core/bytes.dart';
 import 'package:zelt_core/constants.dart';
 import 'package:zelt_core/crypto.dart';
+import 'package:zelt_core/onion.dart';
 import 'package:zelt_core/sphinx.dart';
 
 Future<(List<KeyPair25519>, List<Hop>)> makeHops(int n) async {
@@ -16,7 +17,10 @@ Future<(List<KeyPair25519>, List<Hop>)> makeHops(int n) async {
     keys.add(k);
     hops.add(
       Hop(
-        RelayInfo(NodeAddr(InternetAddress.loopbackIPv4, 9000 + i), k.pub),
+        // Identity (link) key and onion key are distinct.
+        RelayInfo(NodeAddr(InternetAddress.loopbackIPv4, 9000 + i), randomBytes(32)),
+        k.pub,
+        i * 7,
         delayMs: i * 10,
       ),
     );

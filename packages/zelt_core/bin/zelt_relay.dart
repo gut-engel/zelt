@@ -64,20 +64,25 @@ Future<void> main(List<String> args) async {
     }
   }
 
+  // State: the relay's Ed25519 identity and token secret. Onion keys are
+  // never stored; they live in RAM and rotate.
   final f = File(statePath);
-  KeyPair25519 key;
+  SigningKey identity;
   List<int> secret;
-  if (f.existsSync()) {
-    final j = jsonDecode(f.readAsStringSync());
-    key = KeyPair25519.fromJson(j['node']);
-    secret = unb64(j['secret']);
+  final j = f.existsSync() ? jsonDecode(f.readAsStringSync()) as Map<String, dynamic> : <String, dynamic>{};
+  secret = j['secret'] != null ? unb64(j['secret']) : randomBytes(32);
+  if (j['identity'] != null) {
+    identity = SigningKey.fromJson(j['identity']);
   } else {
-    key = await Crypto.x25519Generate();
-    secret = randomBytes(32);
-    f.writeAsStringSync(jsonEncode({'node': key.toJson(), 'secret': b64(secret)}));
+    identity = await Crypto.ed25519Generate();
+    if (j['node'] != null) {
+      stdout.writeln('Upgraded to protocol v$protocolVersion: this relay has a new identity and share string.');
+    }
+    f.writeAsStringSync(jsonEncode({'identity': identity.toJson(), 'secret': b64(secret)}));
+    await Process.run('chmod', ['600', f.path]);
   }
 
-  final node = Node(key: key, relaySecret: unb64(b64(secret)), port: port);
+  final node = Node(identity: identity, relaySecret: unb64(b64(secret)), port: port);
   node.onLog = (m) => stdout.writeln('[${DateTime.now().toIso8601String()}] $m');
   await node.start(relay: true);
 
@@ -85,7 +90,7 @@ Future<void> main(List<String> args) async {
   // With --public-ip only those addresses are advertised (container bridges
   // and private interfaces would only confuse peers).
   if (publicIps.isNotEmpty) {
-    mine = [for (final ip in publicIps) RelayInfo(NodeAddr(InternetAddress(ip), node.port), key.pub)];
+    mine = [for (final ip in publicIps) RelayInfo(NodeAddr(InternetAddress(ip), node.port), identity.pub)];
   }
   stdout.writeln('zelt relay running. Share strings:');
   for (final r in mine) {

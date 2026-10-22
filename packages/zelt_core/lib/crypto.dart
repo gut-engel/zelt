@@ -151,6 +151,34 @@ class Crypto {
     return Uint8List.fromList(out);
   }
 
+  // --- Ed25519 ---------------------------------------------------------
+
+  static final _ed = Ed25519();
+
+  static Future<SigningKey> ed25519Generate() => ed25519FromSeed(randomBytes(32));
+
+  static Future<SigningKey> ed25519FromSeed(List<int> seed) async {
+    final kp = await _ed.newKeyPairFromSeed(seed);
+    return SigningKey(Uint8List.fromList(seed), Uint8List.fromList((await kp.extractPublicKey()).bytes));
+  }
+
+  static Future<Uint8List> ed25519Sign(SigningKey key, List<int> message) async {
+    final kp = await _ed.newKeyPairFromSeed(key.seed);
+    return Uint8List.fromList((await _ed.sign(message, keyPair: kp)).bytes);
+  }
+
+  static Future<bool> ed25519Verify(List<int> publicKey, List<int> message, List<int> signature) async {
+    if (publicKey.length != 32 || signature.length != 64) return false;
+    try {
+      return await _ed.verify(
+        message,
+        signature: Signature(signature, publicKey: SimplePublicKey(publicKey, type: KeyPairType.ed25519)),
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
   // --- ML-KEM-768 -------------------------------------------------------
 
   static Future<KemKeyPair> kemGenerate() => Worker.run(() {
@@ -268,6 +296,16 @@ class KeyPair25519 {
   Map<String, dynamic> toJson() => {'priv': b64(priv), 'pub': b64(pub)};
   factory KeyPair25519.fromJson(Map<String, dynamic> j) =>
       KeyPair25519(unb64(j['priv']), unb64(j['pub']));
+}
+
+/// An Ed25519 signing key (a relay's long-term identity).
+class SigningKey {
+  final Uint8List seed;
+  final Uint8List pub;
+  SigningKey(this.seed, this.pub);
+
+  Map<String, dynamic> toJson() => {'seed': b64(seed), 'pub': b64(pub)};
+  factory SigningKey.fromJson(Map<String, dynamic> j) => SigningKey(unb64(j['seed']), unb64(j['pub']));
 }
 
 class KemKeyPair {

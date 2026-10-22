@@ -265,12 +265,16 @@ class PeerManager {
     return [for (final r in pickd) r.relay];
   }
 
-  /// [n] distinct random verified active peers, none of them in [exclude].
-  List<RelayInfo> pick(int n, {Iterable<Uint8List> exclude = const []}) {
+  /// [n] distinct random verified active peers, none of them in [exclude],
+  /// all passing [usable] (e.g. "has a valid onion key").
+  List<RelayInfo> pick(int n, {Iterable<Uint8List> exclude = const [], bool Function(RelayInfo)? usable}) {
     final ex = {for (final e in exclude) hex(e)};
     final pool = [
       for (final k in active)
-        if (verified(known[k]!) && !ex.contains(known[k]!.relay.id)) known[k]!.relay,
+        if (verified(known[k]!) &&
+            !ex.contains(known[k]!.relay.id) &&
+            (usable == null || usable(known[k]!.relay)))
+          known[k]!.relay,
     ]..shuffle(_rng);
     return pool.take(n).toList();
   }

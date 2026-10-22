@@ -48,7 +48,7 @@ Future<void> until(bool Function() cond, String what, {Duration max = const Dura
 Future<Node> relayNode() async {
   final id = await Identity.generate();
   final n = Node(
-    key: id.node,
+    identity: id.node,
     relaySecret: id.relaySecret,
     port: 0,
     bindAddress: InternetAddress.loopbackIPv4,
@@ -211,7 +211,7 @@ void main() {
     await alice.sendText(ab.id, 'while you were away');
     await Future.delayed(const Duration(seconds: 1));
 
-    bob = Messenger.fromJson(saved, timings: fastTimings, bindAddress: InternetAddress.loopbackIPv4);
+    bob = await Messenger.load(saved, timings: fastTimings, bindAddress: InternetAddress.loopbackIPv4);
     cleanup.add(bob);
     await bob.start();
     final ba2 = bob.contacts[ba.id]!;
@@ -355,6 +355,32 @@ void main() {
     await alice.sendText(ab.id, 'found in a later batch');
     await until(() => ba.messages.any((x) => x.text == 'found in a later batch'), 'delivery');
     expect(bob.logLines.any((l) => l.startsWith(RegExp(r'\S+ fetched'))), isTrue);
+  });
+
+  test('relays restart with fresh onion keys and delivery continues', () async {
+    final alice = await messenger('alice');
+    final bob = await messenger('bob');
+    cleanup.addAll([alice, bob]);
+    await alice.start();
+    await bob.start();
+    await addRelays(alice);
+    await addRelays(bob);
+    final (ab, ba) = await pair(alice, bob);
+    await until(() => ab.ready && ba.ready, 'handshake');
+    await alice.sendText(ab.id, 'before');
+    await until(() => ba.messages.any((x) => x.text == 'before'), 'delivery before restart');
+
+    // Every relay restarts: same identity and address, all onion keys new.
+    for (var i = 0; i < relays.length; i++) {
+      final old = relays[i];
+      final port = old.port;
+      await old.stop();
+      // A real restart keeps the identity and token secret; onion keys are new.
+      relays[i] = Node(identity: old.identity, relaySecret: old.issuer.secret, port: port, bindAddress: InternetAddress.loopbackIPv4);
+      await relays[i].start(relay: true);
+    }
+    await alice.sendText(ab.id, 'after');
+    await until(() => ba.messages.any((x) => x.text == 'after'), 'delivery after restart');
   });
 
   test('share string round trip', () async {

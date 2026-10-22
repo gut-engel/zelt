@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'address.dart';
 import 'bytes.dart';
+import 'onion.dart';
 import 'tokens.dart';
 
 /// Routing information friends keep sending each other. This is how the
@@ -20,13 +21,19 @@ class AddressInfo {
   /// relay lists stay in sync.
   final List<RelayInfo> known;
 
-  static const maxKnown = 24;
+  /// Onion-key certificates for the relays above (each verified against the
+  /// identity it names), so receivers can route through them.
+  final List<OnionKeyCert> certs;
+
+  static const maxKnown = 16;
+  static const maxCerts = 20;
 
   AddressInfo({
     this.relays = const [],
     this.mailboxes = const [],
     this.relayCreds = const [],
     this.known = const [],
+    this.certs = const [],
   });
 
   void write(ByteWriter w) {
@@ -42,9 +49,15 @@ class AddressInfo {
     for (final c in relayCreds) {
       w.bytes(c.encode());
     }
-    w.u8(known.length);
-    for (final r in known.take(maxKnown)) {
+    final k = known.take(maxKnown).toList();
+    w.u8(k.length);
+    for (final r in k) {
       w.bytes(r.encode());
+    }
+    final c = certs.take(maxCerts).toList();
+    w.u8(c.length);
+    for (final x in c) {
+      w.bytes(x.encode());
     }
   }
 
@@ -54,11 +67,15 @@ class AddressInfo {
     ],
     mailboxes: [for (var i = r.u8(); i > 0; i--) Credential.decode(r)],
     relayCreds: [for (var i = r.u8(); i > 0; i--) Credential.decode(r)],
-    known: [
-      for (var i = r.u8(); i > 0 && i <= maxKnown; i--)
-        RelayInfo.decode(r.bytes(RelayInfo.encodedSize)),
-    ],
+    known: _list(r, maxKnown, () => RelayInfo.decode(r.bytes(RelayInfo.encodedSize))),
+    certs: _list(r, maxCerts, () => OnionKeyCert.decode(r)),
   );
+
+  static List<T> _list<T>(ByteReader r, int max, T Function() item) {
+    final n = r.u8();
+    if (n > max) throw const FormatException('list too long');
+    return [for (var i = 0; i < n; i++) item()];
+  }
 }
 
 /// Sent before the Double Ratchet exists, sealed with the pairing keys.

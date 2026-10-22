@@ -17,8 +17,7 @@ Future<void> main(List<String> args) async {
     stderr.writeln('usage: zelt_check zelt-relay:IP:PORT/KEY [...]');
     exit(64);
   }
-  final me = await Crypto.x25519Generate();
-  final node = Node(key: me, relaySecret: randomBytes(32), port: 0);
+  final node = Node(identity: await Crypto.ed25519Generate(), relaySecret: randomBytes(32), port: 0);
   var failed = 0;
   for (final a in args) {
     final RelayInfo r;
@@ -31,9 +30,15 @@ Future<void> main(List<String> args) async {
     }
     final sw = Stopwatch()..start();
     final ok = await node.ping(r, timeout: const Duration(seconds: 8));
+    // The relay pushes its onion-key certificates right after the handshake.
+    for (var i = 0; ok && i < 20 && node.certs.best(r.nodePk) == null; i++) {
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+    final cert = node.certs.best(r.nodePk);
     stdout.writeln(ok
-        ? 'OK    ${r.addr}  handshake + ping in ${sw.elapsedMilliseconds} ms'
-        : 'FAIL  ${r.addr}  no answer (unreachable, filtered, or wrong key)');
+        ? 'OK    ${r.addr}  identity verified, ping ${sw.elapsedMilliseconds} ms, '
+            '${cert == null ? 'NO onion key' : 'onion key valid until ${cert.validUntil.toUtc()}'}'
+        : 'FAIL  ${r.addr}  no answer (unreachable, filtered, wrong identity, or old protocol)');
     if (!ok) failed++;
   }
   await node.stop();

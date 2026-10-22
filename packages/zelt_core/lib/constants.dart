@@ -1,7 +1,8 @@
 /// Protocol constants. Changing any of these breaks wire compatibility.
 library;
 
-/// v2: LIONESS payloads, versioned link handshake. Nodes of different
+/// v2: LIONESS payloads, versioned and signature-authenticated link
+/// handshake, rotating onion keys (1-byte key ID in the header). Nodes of different
 /// versions refuse each other cleanly (see Link).
 const int protocolVersion = 2;
 
@@ -19,7 +20,8 @@ const int defaultHops = 4;
 const int slotSize = 120;
 const int numSlots = maxHops;
 const int routingSize = slotSize * numSlots;
-const int headerSize = 32 + 16 + routingSize;
+/// keyId(1) eph(32) mac(16) routing.
+const int headerSize = 1 + 32 + 16 + routingSize;
 const int payloadSize = packetSize - headerSize;
 
 /// Size of the encrypted blob a mailbox relay stores.

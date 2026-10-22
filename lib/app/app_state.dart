@@ -158,7 +158,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _vault = v;
     final msgr = state == null
         ? Messenger(identity: await Identity.generate(), settings: Settings())
-        : Messenger.fromJson(state);
+        : await Messenger.load(state);
     await _attach(msgr);
   }
 

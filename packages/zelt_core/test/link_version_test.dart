@@ -32,7 +32,7 @@ void main() {
   });
 
   test('relay answers a newer client with its own version and hangs up', () async {
-    final key = await Crypto.x25519Generate();
+    final key = await Crypto.ed25519Generate();
     final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
     final accepted = Completer<Object?>();
     server.listen((s) async {
@@ -53,7 +53,7 @@ void main() {
   });
 
   test('same version connects and exchanges frames', () async {
-    final key = await Crypto.x25519Generate();
+    final key = await Crypto.ed25519Generate();
     final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
     final got = Completer<Frame>();
     server.listen((s) async => (await Link.accept(s, key)).start().frames.first.then(got.complete));
@@ -61,6 +61,16 @@ void main() {
     await link.send(Frame.ping());
     expect((await got.future.timeout(const Duration(seconds: 5))).type, FrameType.ping);
     link.close();
+    await server.close();
+  });
+
+  test('a relay that cannot sign for the advertised identity is refused', () async {
+    final real = await Crypto.ed25519Generate();
+    final impostor = await Crypto.ed25519Generate();
+    final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    server.listen((s) => Link.accept(s, impostor).catchError((_) => throw 'x').ignore());
+    final r = RelayInfo(NodeAddr(InternetAddress.loopbackIPv4, server.port), real.pub);
+    await expectLater(Link.connect(r), throwsA(isA<SocketException>()));
     await server.close();
   });
 }
