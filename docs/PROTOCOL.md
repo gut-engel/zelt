@@ -278,6 +278,17 @@ RAM only. 12 MB hard cap, 512 KB per contact slot, 128 KB per public slot,
 2 MB for all public slots together, 4 MB for handed-off blobs. TTL 7 days. When a
 cap is hit, the oldest blob in that scope goes first.
 
+### What a relay restart loses
+
+A relay keeps no state on disk except its identity key and token secret. A
+restart, crash or kill loses everything else, by design:
+
+| Lost | Consequence | What bounds it |
+| --- | --- | --- |
+| Stored blobs | Messages waiting there are gone | Every message has 3 copies on 3 relays, the sender keeps it until a receipt and retries through new relays, and handoff covers a clean exit |
+| Onion keys and their replay caches | Packets encrypted to the old keys can no longer be processed | Nothing to bound: an old packet cannot be replayed (the key is gone) or peeled later. Senders re-learn the new keys (see Onion keys) |
+| Spent-token sets | An already-spent token index can be accepted once more until its credential epoch expires (at most 4 × 7 days) | Only the legitimate holder of that credential's keys can mint it again. A recorded store packet cannot be replayed (new onion keys), and a token is bound to its blob's hash. A double spend only uses the holder's own slot quota (512 KB per contact slot, 128 KB per public slot, 2 MB for all public slots, 12 MB in total, oldest dropped first, 7-day TTL) |
+
 ## Delivery
 
 1. The sender encrypts once with the ratchet and keeps the inner content
@@ -360,9 +371,8 @@ Cover traffic options:
   tell who that recipient is. IDs rotate daily, and copies on other relays use
   unrelated IDs and bytes. Relays can still correlate copies by timing.
 - A relay learns which of its operator's contacts' slots a token came from.
-- Spent-token sets live in RAM, so a relay restart lets an index be reused once.
-  The per-slot quotas still bound the damage. (Onion replay caches are also RAM
-  only, but a restart replaces the onion keys, so old packets cannot be replayed.)
+- A relay restart forgets its spent-token sets (see "What a relay restart
+  loses").
 - On Android the network code runs in the app process, kept alive by a foreground
   service. If the system kills the process, relay data is lost by design, and the
   3-copy rule covers it.
