@@ -358,10 +358,14 @@ class Messenger {
     final seed = randomBytes(32);
     final relays = (await node.localRelayInfos()).take(3).toList();
     int? slot;
-    Credential? cred;
+    int? epoch;
+    Uint8List? slotKey;
     if (relays.isNotEmpty) {
+      // The scanner gets the whole slot on our relay: half to send to us, half
+      // for its own mailbox use (whatever it delegates is carved from the tree).
       slot = nextSlot++;
-      cred = await node.issuer.issue(relays.first, slot);
+      epoch = tokenEpochOf(DateTime.now());
+      slotKey = await node.issuer.keyFor(slot, epoch);
     }
     final grants = <Credential>[];
     for (final rec in _currentMailboxes().where((m) => !m.own).take(2)) {
@@ -374,9 +378,9 @@ class Messenger {
       seed: seed,
       name: settings.name,
       relays: relays,
-      credSlot: cred?.slot,
-      credEpoch: cred?.epoch,
-      credKey: cred?.key,
+      credSlot: slot,
+      credEpoch: epoch,
+      credKey: slotKey,
       grants: grants,
     ).encode();
     _changed();
@@ -424,9 +428,9 @@ class Messenger {
       final r0 = theirs.relays.first;
       const half = tokensPerCredential ~/ 2;
       c.theirMailboxes.add(
-        Credential(r0, theirs.credSlot!, theirs.credEpoch!, theirs.credKey!, next: 0, end: half),
+        Credential.fromSlotKey(r0, theirs.credSlot!, theirs.credEpoch!, theirs.credKey!, next: 0, end: half),
       );
-      _addHeld(Credential(r0, theirs.credSlot!, theirs.credEpoch!, theirs.credKey!, next: half));
+      _addHeld(Credential.fromSlotKey(r0, theirs.credSlot!, theirs.credEpoch!, theirs.credKey!, next: half));
     }
     // Mailbox grants are last hops only; they never enter our own routing,
     // so a contact cannot hand us their friends' relays as peers.
@@ -567,13 +571,15 @@ class Messenger {
     if (relays.isNotEmpty) {
       if (c.slot == 0) c.slot = nextSlot++;
       final k = await node.issuer.issue(relays.first, c.slot);
-      creds.add(Credential(k.relay, k.slot, k.epoch, k.key, next: half));
+      final slotKey = await node.issuer.keyFor(c.slot, k.epoch);
+      creds.add(Credential.fromSlotKey(k.relay, k.slot, k.epoch, slotKey, next: half));
     }
     for (final rec in _currentMailboxes()) {
       if (rec.own) {
         if (relays.isEmpty) continue;
         final k = await node.issuer.issue(relays.first, c.slot);
-        mbox.add(Credential(k.relay, k.slot, k.epoch, k.key, next: 0, end: half));
+        final slotKey = await node.issuer.keyFor(c.slot, k.epoch);
+        mbox.add(Credential.fromSlotKey(k.relay, k.slot, k.epoch, slotKey, next: 0, end: half));
       } else {
         final g = _bestHeld(rec.relay.nodePk)?.carve(128);
         if (g != null) mbox.add(g);
@@ -724,7 +730,7 @@ class Messenger {
       for (final r in replies) {
         final c = r.credential;
         if (r.type == Reply.credential && c != null && bytesEqual(c.relay.nodePk, t.nodePk)) {
-          _addHeld(Credential(t, c.slot, c.epoch, c.key, next: c.next, end: c.end));
+          _addHeld(c.withRelay(t));
           got = true;
         }
       }

@@ -34,12 +34,72 @@ void main() {
       expect(await issuer.verifyAndSpend(await other.take(h), h), isFalse);
     });
 
-    test('carve gives disjoint ranges', () async {
+    test('carve hands out aligned, disjoint power-of-two blocks', () async {
       final cred = await TokenIssuer(randomBytes(32)).issue(ri('10.0.0.1'), 1);
-      final a = cred.carve(10)!;
-      final b = cred.carve(10)!;
-      expect(a.end, b.next);
-      expect(cred.next, 20);
+      cred.next = 5; // unaligned position
+      final a = cred.carve(16)!;
+      final b = cred.carve(16)!;
+      expect((a.next, a.end), (16, 32), reason: 'aligned to its size');
+      expect((b.next, b.end), (32, 48));
+      expect(a.nodes.length, 1, reason: 'one subtree key');
+      expect(cred.next, 48);
+      expect(() => cred.carve(10), throwsArgumentError);
+    });
+
+    test('delegated tokens verify, including nested delegation', () async {
+      final issuer = TokenIssuer(randomBytes(32));
+      final root = await issuer.issue(ri('10.0.0.1'), 3);
+      final mid = root.carve(256)!; // [0, 256)
+      final leaf = mid.carve(64)!; // [0, 64) of mid
+      for (final c in [root, mid, leaf]) {
+        final h = randomBytes(32);
+        expect(await issuer.verifyAndSpend(await c.take(h), h), isTrue);
+      }
+    });
+
+    test('a delegated range cannot produce tokens outside it', () async {
+      final issuer = TokenIssuer(randomBytes(32));
+      final root = await issuer.issue(ri('10.0.0.1'), 7);
+      root.next = 64;
+      final d = root.carve(64)!; // [64, 128)
+      expect((d.next, d.end), (64, 128));
+
+      // 1. Editing the range fields does not give the keys.
+      final widened = Credential(d.relay, d.slot, d.epoch, d.nodes, next: 200, end: 4096);
+      await expectLater(widened.take(randomBytes(32)), throwsStateError);
+
+      // 2. Using any key the holder has, or can derive, for index 200.
+      final h = randomBytes(32);
+      final candidates = <Uint8List>[
+        for (final n in d.nodes) n.key,
+        for (final n in d.nodes) ...[for (var i = n.start; i < n.end; i++) tokenLeafKey(n.key, i)],
+      ];
+      for (final k in candidates.take(200)) {
+        final mac = await Crypto.hmac(k, [0, 200, ...h]);
+        expect(await issuer.verifyAndSpend(Token(7, d.epoch, 200, mac.sublist(0, 16)), h), isFalse);
+      }
+      // 3. Its own range still works.
+      final ok = randomBytes(32);
+      expect(await issuer.verifyAndSpend(await d.take(ok), ok), isTrue);
+    });
+
+    test('credential encoding and saved formats round-trip', () async {
+      final issuer = TokenIssuer(randomBytes(32));
+      final c = (await issuer.issue(ri('10.0.0.1'), 9)).carve(128)!;
+      final back = Credential.decode(ByteReader(c.encode()));
+      expect((back.next, back.end, back.nodes.length), (c.next, c.end, c.nodes.length));
+      final json = Credential.fromJson(c.toJson());
+      final h = randomBytes(32);
+      expect(await issuer.verifyAndSpend(await json.take(h), h), isTrue);
+      // Saved before the key tree: {k: slot key}.
+      final slotKey = await issuer.keyFor(9, c.epoch);
+      final legacy = Credential.fromJson({
+        'r': c.relay.toJson(), 's': 9, 'e': c.epoch, 'k': b64(slotKey), 'n': 300, 'x': 400,
+      });
+      final h2 = randomBytes(32);
+      final t = await legacy.take(h2);
+      expect(t.index, 300);
+      expect(await issuer.verifyAndSpend(t, h2), isTrue);
     });
   });
 

@@ -246,14 +246,28 @@ sig  = Ed25519(identity, "zelt/onion-key/v2" ‖ relayPk ‖ keyId ‖ onionPk �
 
 ## Send tokens
 
-A relay derives `key(slot, epoch) = HMAC(relaySecret, "tok" ‖ slot ‖ epoch)`, where
-an epoch is 7 days and a key is valid for 4 epochs. A **credential**
-`(relay, slot, epoch, key, [next, end))` is a batch of 4096 one-time tokens.
-Token *i* for a blob is `slot ‖ epoch ‖ i ‖ HMAC(key, i ‖ SHA-256(blob))[0:16]`.
-The relay checks the MAC and keeps the spent indices in RAM.
+A relay derives the slot key `K = HMAC(relaySecret, "tok" ‖ slot ‖ epoch)`,
+where an epoch is 7 days and a key is valid for 4 epochs. `K` is the root of a
+binary key tree of depth 12, whose 4096 leaves are one-time tokens:
 
-- Each contact gets its own slot on your relay. The QR code or `update`
-  messages carry it.
+```
+child(k, bit) = HMAC(k, "zelt/tok/child" ‖ bit)
+leaf_i        = the bits of i, most significant first, walked down from K
+token_i       = slot ‖ epoch ‖ i ‖ HMAC(leaf_i, i ‖ SHA-256(blob))[0:16]
+```
+
+A **credential** `(relay, slot, epoch, next, end, nodes)` holds only the subtree
+keys (`depth(u8) prefix(u16) key(32)`, at most 24) covering its range `[next, end)`.
+So it **cannot mint tokens outside that range**, and neither can anything
+delegated from it. Delegation (`carve`) hands out power-of-two blocks aligned to
+their size, so a grant is usually a single subtree key: 97 bytes on the wire. The
+relay derives `leaf_i` from its slot key with 12 HMACs, checks the MAC and keeps
+the spent indices in RAM.
+
+- Each contact gets its own slot on your relay. The QR code carries the slot
+  key itself, since the scanner gets the whole slot: indices `[0, 2048)` to send
+  to you and `[2048, 4096)` for its own mailbox use. `update` messages carry the
+  two halves as separate credentials.
 - Recipients sub-delegate ranges of their credentials to their senders
   (`AddressInfo.mailboxes`).
 - Strangers get a small public slot (`tokenReq`). Public slots share a 2 MB pool.
