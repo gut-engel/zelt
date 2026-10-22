@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -12,7 +14,9 @@ import 'widgets.dart';
 
 /// In-person pairing: both phones show their code and scan the other's.
 class PairScreen extends StatefulWidget {
-  const PairScreen({super.key});
+  /// How long the code stays visible before it hides itself.
+  final Duration qrTimeout;
+  const PairScreen({super.key, this.qrTimeout = const Duration(seconds: 90)});
 
   @override
   State<PairScreen> createState() => _PairScreenState();
@@ -22,13 +26,33 @@ class _PairScreenState extends State<PairScreen> {
   PairingSession? _session;
   Contact? _paired;
   String? _error;
+  bool _hidden = false;
+  Timer? _hideTimer;
+  late final AppState _app;
 
   @override
   void initState() {
     super.initState();
-    context.read<AppState>().m.newPairingSession().then((s) {
+    _app = context.read<AppState>();
+    _app.setSecureScreen(true);
+    _app.m.newPairingSession().then((s) {
       if (mounted) setState(() => _session = s);
     });
+    _armHide();
+  }
+
+  void _armHide() {
+    _hideTimer?.cancel();
+    _hideTimer = Timer(widget.qrTimeout, () {
+      if (mounted) setState(() => _hidden = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _hideTimer?.cancel();
+    _app.setSecureScreen(false);
+    super.dispose();
   }
 
   Future<void> _scan() async {
@@ -113,6 +137,22 @@ class _PairScreenState extends State<PairScreen> {
                 decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
                 child: s == null
                     ? const SizedBox(width: 280, height: 280, child: Center(child: CircularProgressIndicator()))
+                    : _hidden
+                    ? SizedBox(
+                        width: 280,
+                        height: 280,
+                        child: Center(
+                          child: OutlinedButton.icon(
+                            key: const Key('showQrAgain'),
+                            onPressed: () {
+                              setState(() => _hidden = false);
+                              _armHide();
+                            },
+                            icon: const Icon(Icons.visibility),
+                            label: const Text('Show code again'),
+                          ),
+                        ),
+                      )
                     : QrImageView(
                         data: s.code,
                         size: 280,
@@ -122,10 +162,25 @@ class _PairScreenState extends State<PairScreen> {
               ),
             ),
             const SizedBox(height: 8),
-            Text(
-              'The code holds a fresh secret. Show it only to the friend in front of you.',
-              textAlign: TextAlign.center,
-              style: t.textTheme.bodySmall,
+            Card(
+              color: t.colorScheme.errorContainer,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  children: [
+                    Icon(Icons.warning_amber, color: t.colorScheme.onErrorContainer),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        'This code is a secret. Anyone who photographs it gets your pairing '
+                        'secret and your relay addresses. Show it only to the friend in '
+                        'front of you. It hides itself after ${widget.qrTimeout.inSeconds} s.',
+                        style: TextStyle(color: t.colorScheme.onErrorContainer),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
             const SizedBox(height: 24),
             Text('2. Scan their code', style: t.textTheme.titleMedium),

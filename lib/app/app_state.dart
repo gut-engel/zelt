@@ -222,6 +222,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
+  /// Blocks screenshots and screen recording while a secret is on screen.
+  Future<void> setSecureScreen(bool on) => _call('secure', {'on': on});
+
   /// Sends the task to the background instead of finishing the activity,
   /// so the relay keeps running.
   Future<void> moveToBackground() => _call('background');

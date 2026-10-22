@@ -67,7 +67,11 @@ rk0 = HKDF(ikm = DH(id,id') ‖ DH(eph,eph') ‖ DH(id_I,eph_R) ‖ DH(eph_I,id_
 ```
 
 The seeds only ever travel optically, so `rk0` stays secret against an observer
-who records all traffic, even one who later breaks X25519.
+who records all traffic, even one who later breaks X25519. That makes the QR code
+itself the secret: whoever photographs it gets the seed and the relay addresses.
+The pairing screen therefore sets Android's `FLAG_SECURE` (no screenshots, screen
+recording or recent-apps thumbnail), hides the code after 90 s (it can be shown
+again for the same session) and warns about photographs.
 
 From `rk0`, per direction (`i2r`, `r2i`): a mailbox key, an envelope key and a
 delete key (`HKDF(rk0, "zelt/conv/{mbox,env,del}/{dir}")`).

@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import android.view.WindowManager
 import java.io.File
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -43,6 +44,16 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
                     "abi" -> result.success(Build.SUPPORTED_ABIS.firstOrNull())
+                    "secure" -> {
+                        // Blocks screenshots, screen recording and the recents
+                        // thumbnail while a secret (the pairing QR) is shown.
+                        val on = call.argument<Boolean>("on") == true
+                        runOnUiThread {
+                            if (on) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                            else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                        }
+                        result.success(null)
+                    }
                     "installApk" -> installApk(call.argument<String>("path")!!, result)
                     "background" -> {
                         // Keep the engine (and the relay) alive instead of finishing.

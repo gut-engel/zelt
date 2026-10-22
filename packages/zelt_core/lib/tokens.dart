@@ -137,7 +137,7 @@ class Credential {
         add(depth + 1, prefix * 2);
         add(depth + 1, prefix * 2 + 1);
       } else {
-        throw StateError('index ${prefix} is outside this credential');
+        throw StateError('index $prefix is outside this credential');
       }
     }
 

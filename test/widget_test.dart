@@ -5,6 +5,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'package:zelt/app/app_state.dart';
 import 'package:zelt_core/messenger.dart';
 import 'package:zelt_core/models.dart';
+import 'package:zelt/app/screens/pair_screen.dart';
 import 'package:zelt/main.dart';
 
 void main() {
@@ -24,6 +25,7 @@ void main() {
 
   screens();
   pairScreen();
+  pairQrAutoHide();
 }
 
 Future<AppState> unlockedWithFriend(WidgetTester tester) async {
@@ -82,5 +84,26 @@ void pairScreen() {
     await tester.pumpAndSettle();
     expect(find.byType(QrImageView), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+}
+
+void pairQrAutoHide() {
+  testWidgets('pairing QR warns, hides itself after the timeout and can be shown again', (tester) async {
+    final app = await unlockedWithFriend(tester);
+    await tester.pumpWidget(ChangeNotifierProvider.value(
+      value: app,
+      child: const MaterialApp(home: PairScreen(qrTimeout: Duration(seconds: 2))),
+    ));
+    await tester.runAsync(() => Future.delayed(const Duration(milliseconds: 500)));
+    await tester.pump();
+    expect(find.byType(QrImageView), findsOneWidget);
+    expect(find.textContaining('Anyone who photographs it'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 3));
+    expect(find.byType(QrImageView), findsNothing);
+    await tester.tap(find.byKey(const Key('showQrAgain')));
+    await tester.pump();
+    expect(find.byType(QrImageView), findsOneWidget);
+    await tester.pump(const Duration(seconds: 3));
+    expect(find.byType(QrImageView), findsNothing);
   });
 }
