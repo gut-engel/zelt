@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:test/test.dart';
@@ -7,6 +8,7 @@ import 'package:zelt_core/bytes.dart';
 import 'package:zelt_core/constants.dart';
 import 'package:zelt_core/crypto.dart';
 import 'package:zelt_core/envelope.dart';
+import 'package:zelt_core/messenger.dart';
 import 'package:zelt_core/models.dart';
 import 'package:zelt_core/pairing.dart';
 import 'package:zelt_core/peers.dart';
@@ -276,6 +278,38 @@ void main() {
       pm.refresh();
       expect(pm.active.length, 6);
       expect(pm.lowDiversity, isTrue);
+    });
+
+    test('last-resort probing: bounded batches, every relay each pass, random order', () {
+      final pm = PeerManager();
+      for (var i = 0; i < 20; i++) {
+        pm.add(ri('10.${i + 1}.0.1'), 'history');
+      }
+      List<String> pass() {
+        final seen = <String>[];
+        while (seen.length < 20) {
+          final b = pm.lastResort(10);
+          expect(b.length, lessThanOrEqualTo(PeerManager.maxResortBatch));
+          seen.addAll(b.map((r) => r.key));
+        }
+        return seen;
+      }
+      final p1 = pass();
+      final p2 = pass();
+      expect(p1.toSet().length, 20, reason: 'whole history covered in a pass');
+      expect(p2.toSet().length, 20);
+      expect(p1, isNot(p2), reason: 'a fresh random order every pass');
+    });
+
+    test('last-resort backoff doubles from ~5 s to ~5 min with jitter', () {
+      final rng = Random(1);
+      for (var i = 0; i < 50; i++) {
+        final d0 = Messenger.resortDelay(0, rng).inMilliseconds;
+        expect(d0, inInclusiveRange(4000, 6000));
+        final dMax = Messenger.resortDelay(30, rng).inMilliseconds;
+        expect(dMax, inInclusiveRange(240000, 360000));
+      }
+      expect(Messenger.resortDelay(3, Random(2)).inMilliseconds, greaterThan(Messenger.resortDelay(1, Random(2)).inMilliseconds));
     });
 
     test('failing peers drop out', () {

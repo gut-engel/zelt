@@ -90,20 +90,31 @@ class PeerManager {
     }
   }
 
+  List<String> _resortOrder = [];
   int _resortCursor = 0;
 
-  /// Relays to probe when nothing is reachable: walks the whole history,
-  /// ignoring failure cool-downs, a few at a time.
+  /// Relays to probe when nothing is reachable: walks the whole history in a
+  /// fresh random order on every pass, at most [maxResortBatch] at a time, so
+  /// probes follow no fixed pattern. Failure cool-downs are ignored here.
   List<RelayInfo> lastResort(int n) {
-    final all = known.values.toList();
-    if (all.isEmpty) return [];
+    final batch = n.clamp(0, maxResortBatch);
     final out = <RelayInfo>[];
-    for (var i = 0; i < n && i < all.length; i++) {
-      out.add(all[(_resortCursor + i) % all.length].relay);
+    while (out.length < batch && known.isNotEmpty) {
+      if (_resortCursor >= _resortOrder.length) {
+        // A batch never spans two passes: each pass is one full permutation.
+        if (out.isNotEmpty) break;
+        _resortOrder = known.keys.toList()..shuffle(_rng);
+        _resortCursor = 0;
+      }
+      final k = _resortOrder[_resortCursor++];
+      final rec = known[k];
+      if (rec != null && !out.contains(rec.relay)) out.add(rec.relay);
+      if (out.length >= known.length) break;
     }
-    _resortCursor = (_resortCursor + n) % all.length;
     return out;
   }
+
+  static const maxResortBatch = 3;
 
   /// Relays worth telling friends about: reached recently, not loopback.
   List<RelayInfo> shareable(int max) {

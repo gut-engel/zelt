@@ -313,7 +313,11 @@ void main() {
     final before = bob.peers.known.length;
     bob.deleteContact(ba.id);
     expect(bob.peers.known.length, before);
-    expect(bob.peers.known[extra.key]!.sources, contains('history'));
+    // Still remembered, no longer attributed to the deleted contact (it keeps
+    // other sources such as the DHT, or "history" if it had none).
+    final src = bob.peers.known[extra.key]!.sources;
+    expect(src, isNotEmpty);
+    expect(src.any((x) => x.contains(ba.id)), isFalse);
   });
 
   test('with every peer failing, the relay history is probed until one answers', () async {

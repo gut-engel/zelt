@@ -1365,17 +1365,24 @@ class Messenger {
       if (node.hasEntry == false && peers.active.isNotEmpty) {
         await node.ensureEntry(peers.entryCandidates());
       }
-      // Nothing reachable: walk the whole relay history until one answers.
+      // Nothing reachable: walk the whole relay history until one answers,
+      // in random order, small jittered batches, backing off while it fails.
       if (peers.pick(1).isEmpty && peers.known.isNotEmpty) {
-        for (final r in peers.lastResort(4)) {
-          unawaited(node.ping(r));
+        if (!now.isBefore(_nextResort)) {
+          _nextResort = now.add(resortDelay(_resortRound++, _rng));
+          for (final r in peers.lastResort(PeerManager.maxResortBatch)) {
+            _jittered(() => node.ping(r));
+          }
         }
+      } else {
+        _resortRound = 0;
+        _nextResort = now;
       }
       await _syncRelaysIfChanged();
       // Keep hop candidates verified: a ping is a real connection attempt
       // and updates peer health through onLinkResult.
       for (final r in peers.toProbe(4)) {
-        unawaited(node.ping(r));
+        _jittered(() => node.ping(r));
       }
       // Re-confirm onion keys of a couple of peers we have not heard from
       // directly for a while (catches relays that restarted unseen).
@@ -1385,7 +1392,7 @@ class Messenger {
       }).toList()
         ..shuffle(_rng);
       for (final r in stale.take(2)) {
-        unawaited(node.ping(r));
+        _jittered(() => node.ping(r));
       }
     } catch (e) {
       log('maintenance: $e');
@@ -1401,6 +1408,24 @@ class Messenger {
       if (!outbox.contains(o)) continue;
       await _dispatch(o);
     }
+  }
+
+  int _resortRound = 0;
+  DateTime _nextResort = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// Delay before the next last-resort batch: 5 s doubling to 5 min, ±20%.
+  static Duration resortDelay(int round, Random rng) {
+    final base = 5000 * (1 << round.clamp(0, 6));
+    final capped = base > 300000 ? 300000 : base;
+    return Duration(milliseconds: (capped * (0.8 + 0.4 * rng.nextDouble())).round());
+  }
+
+  /// Runs a probe after a random delay (up to 2 s), so probes do not line up
+  /// with the maintenance tick.
+  void _jittered(Future<Object?> Function() probe) {
+    Timer(Duration(milliseconds: _rng.nextInt(2000)), () {
+      if (_started) unawaited(probe());
+    });
   }
 
   /// Per contact: the relay-list signature we last sent them.

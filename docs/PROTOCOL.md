@@ -327,7 +327,12 @@ other peer rotates per hour.
 the contact who shared it is deleted (`history` source). Unverified relays are
 pinged in small batches, at most once per 10 minutes each. If no verified peer
 is left, zelt walks the whole history, ignoring failure cool-downs, until one
-answers. Only relays reached in the last 30 minutes are used as hops.
+answers. Each pass uses a fresh random order, with at most 3 probes per batch,
+each started after a random delay of up to 2 s. Batches are spaced 5 s apart,
+doubling up to 5 min (±20%) while nothing answers, and the spacing resets as soon
+as a relay answers. Routine probes are jittered the same way, so probes follow
+no fixed order or cadence. Only relays reached in the last 30 minutes are used as
+hops.
 
 **DHT:** Kademlia-style table (`k = 8`, `alpha = 3`), keyed by `SHA-256(nodePk)`.
 Relays announce themselves to peers over a link frame and are added after a ping
