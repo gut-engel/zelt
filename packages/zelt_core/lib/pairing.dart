@@ -40,7 +40,10 @@ class PairingCode {
     this.grants = const [],
   });
 
-  String encode() {
+  String encode() => prefix + b64(toBytes());
+
+  /// The code without its text prefix (also embedded in invite texts).
+  Uint8List toBytes() {
     final w = ByteWriter()
       ..bytes(idPub)
       ..bytes(ephPub)
@@ -63,13 +66,16 @@ class PairingCode {
     for (final g in grants) {
       w.bytes(g.encode());
     }
-    return prefix + b64(w.toBytes());
+    return w.toBytes();
   }
 
   static PairingCode parse(String s) {
     final t = s.trim();
     if (!t.startsWith(prefix)) throw const FormatException('not a zelt code');
-    final r = ByteReader(unb64(t.substring(prefix.length)));
+    return read(ByteReader(unb64(t.substring(prefix.length))));
+  }
+
+  static PairingCode read(ByteReader r) {
     final id = r.bytes(32);
     final eph = r.bytes(32);
     final seed = r.bytes(32);

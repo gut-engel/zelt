@@ -15,6 +15,7 @@ import 'package:zelt_core/bytes.dart';
 import 'package:zelt_core/constants.dart';
 import 'package:zelt_core/crypto.dart';
 import 'package:zelt_core/envelope.dart';
+import 'package:zelt_core/invite.dart';
 import 'package:zelt_core/link.dart';
 import 'package:zelt_core/messages.dart';
 import 'package:zelt_core/node.dart';
@@ -171,6 +172,10 @@ void main() {
       mustNotCrash('Credential', () => Credential.decode(ByteReader(f.mutate(cred.encode()))));
       mustNotCrash('OnionKeyCert', () => OnionKeyCert.decode(ByteReader(f.mutate(cert.encode()))));
       mustNotCrash('RelayInfo share string', () => RelayInfo.parseShareString(String.fromCharCodes(f.random(120))));
+      final invite = InviteCode(inviteId: randomBytes(16), invitePub: randomBytes(32), expiresAt: DateTime.now(), code: PairingCode.parse(code));
+      final inviteBytes = unb64(invite.encode().substring(InviteCode.prefix.length));
+      mustNotCrash('InviteCode', () => InviteCode.parse(InviteCode.prefix + b64(f.mutate(inviteBytes))));
+      mustNotCrash('InviteCode text', () => InviteCode.parse(InviteCode.prefix + String.fromCharCodes(f.random(200))));
     }
   });
 

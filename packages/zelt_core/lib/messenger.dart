@@ -10,6 +10,7 @@ import 'bytes.dart';
 import 'constants.dart';
 import 'crypto.dart';
 import 'envelope.dart';
+import 'invite.dart';
 import 'messages.dart';
 import 'models.dart';
 import 'node.dart';
@@ -127,6 +128,12 @@ class Messenger {
   final Map<String, MailboxRecord> mailboxes = {};
   int nextSlot = 1;
 
+  /// Open invite texts (see invite.dart), by invite ID.
+  final Map<String, PendingInvite> invites = {};
+
+  /// Invite mailbox IDs on the relay being polled or watched.
+  final Map<String, PendingInvite> _inviteIds = {};
+
   final _changes = StreamController<void>.broadcast();
   final _log = <String>[];
   final List<Timer> _timers = [];
@@ -221,6 +228,7 @@ class Messenger {
     'seen': {for (final e in seen.entries) e.key: e.value.toJson()},
     'held': [for (final h in held) h.toJson()],
     'mailboxes': [for (final m in mailboxes.values) m.toJson()],
+    'invites': [for (final i in invites.values) i.toJson()],
     'nextSlot': nextSlot,
     'advertised': _advertised.toList(),
     'certs': node.certs.toJson(),
@@ -271,6 +279,10 @@ class Messenger {
       m.mailboxes[rec.relay.id] = rec;
     }
     m.nextSlot = j['nextSlot'] ?? 1;
+    for (final i in j['invites'] ?? []) {
+      final inv = PendingInvite.fromJson(i);
+      m.invites[inv.id] = inv;
+    }
     m._advertised = {...(j['advertised'] as List? ?? []).cast<String>()};
     m.node.certs.loadJson(j['certs'] as List? ?? []);
     if (j['peers'] != null) m.peers.loadJson(j['peers']);
@@ -377,6 +389,11 @@ class Messenger {
   // --- Pairing ---------------------------------------------------------
 
   Future<PairingSession> newPairingSession() async {
+    final (session, _) = await _newPairingHalf();
+    return session;
+  }
+
+  Future<(PairingSession, PairingCode)> _newPairingHalf() async {
     final eph = await Crypto.x25519Generate();
     final seed = randomBytes(32);
     final relays = (await node.localRelayInfos()).take(3).toList();
@@ -405,15 +422,160 @@ class Messenger {
       credEpoch: epoch,
       credKey: slotKey,
       grants: grants,
-    ).encode();
+    );
     _changed();
-    return PairingSession(eph, seed, slot ?? 0, code);
+    return (PairingSession(eph, seed, slot ?? 0, code.encode()), code);
+  }
+
+  // --- Invite texts ----------------------------------------------------
+
+  /// A one-time invite text: the first friend who uses it within [validity]
+  /// is added; nobody after that, and nobody once it expired.
+  Future<PendingInvite> createInvite({Duration validity = inviteValidity}) async {
+    final (session, code) = await _newPairingHalf();
+    if (code.relays.isEmpty && code.grants.isEmpty) {
+      throw StateError('no mailbox relay yet: wait until zelt is connected');
+    }
+    final inviteId = randomBytes(16);
+    final inviteKey = await Crypto.x25519Generate();
+    // Whole seconds: the text carries the expiry with that precision.
+    final expires = DateTime.fromMillisecondsSinceEpoch(
+      (DateTime.now().add(validity).millisecondsSinceEpoch ~/ 1000) * 1000,
+    );
+    final text = InviteCode(inviteId: inviteId, invitePub: inviteKey.pub, expiresAt: expires, code: code).encode();
+    final inv = PendingInvite(
+      inviteId: inviteId,
+      inviteKey: inviteKey,
+      expiresAt: expires,
+      eph: session.eph,
+      seed: session.seed,
+      slot: session.slot,
+      text: text,
+      keys: await InviteKeys.derive(session.seed, inviteId),
+    );
+    invites[inv.id] = inv;
+    await save();
+    log('invite created, valid until ${expires.toIso8601String().substring(11, 19)}');
+    _rewatchAll(); // watch the invite's mailbox IDs
+    return inv;
+  }
+
+  void cancelInvite(String id) {
+    if (invites.remove(id) == null) return;
+    _inviteIds.removeWhere((_, v) => v.id == id);
+    _changed();
+  }
+
+  void _pruneInvites(DateTime now) {
+    final before = invites.length;
+    invites.removeWhere((_, i) => i.expiredAt(now));
+    if (invites.length != before) {
+      _inviteIds.removeWhere((_, v) => !invites.containsKey(v.id));
+      log('${before - invites.length} invite(s) expired unused');
+      _changed();
+    }
+  }
+
+  /// Uses a friend's invite text. Returns the new contact; it becomes ready
+  /// once the inviter's device accepts the join request.
+  Future<Contact> acceptInvite(String text, {String? name}) async {
+    final inv = InviteCode.parse(text);
+    if (inv.expiredAt(DateTime.now())) throw const FormatException('this invite has expired');
+    final (session, mine) = await _newPairingHalf();
+    final eph = await Crypto.x25519Generate();
+    final dh = await Crypto.x25519(eph, inv.invitePub);
+    final join = PendingJoin(
+      inviteId: inv.inviteId,
+      key: await InviteKeys.joinKey(dh, inv.code.seed, inv.inviteId, eph.pub),
+      ephPub: eph.pub,
+      content: mine.toBytes(),
+      expiresAt: inv.expiresAt,
+      keys: await InviteKeys.derive(inv.code.seed, inv.inviteId),
+    );
+    final c = await completePairingWith(session, inv.code, name: name, join: join);
+    return c;
+  }
+
+  /// Stores fresh copies of our join request in the inviter's mailboxes.
+  Future<void> _sendJoin(Contact c) async {
+    final j = c.pendingJoin;
+    if (j == null) return;
+    final now = DateTime.now();
+    if (!now.isBefore(j.expiresAt)) {
+      c.pendingJoin = null;
+      log('invite from ${c.name} expired before it was accepted');
+      _changed();
+      return;
+    }
+    j.lastSent = now;
+    final epoch = mailboxEpochOf(now);
+    final byNode = <String, Credential>{};
+    for (final g in c.theirMailboxes) {
+      if (g.usable(now)) byNode.putIfAbsent(hex(g.relay.nodePk), () => g);
+    }
+    final grants = byNode.values.toList()..shuffle(_rng);
+    final results = await Future.wait(grants.take(copiesPerMessage).map((g) async {
+      final relay = node.isSelf(g.relay) ? g.relay : (peers.resolve(g.relay.nodePk) ?? g.relay);
+      final mailboxId = await Envelope.mailboxId(j.keys.mbox, epoch, relay.nodePk);
+      final blob = await JoinBlob.seal(j.key, j.ephPub, j.inviteId, j.content);
+      final hash = await Crypto.sha256(blob);
+      final deleteTag = await Envelope.deleteTag(await Envelope.deleteKey(j.keys.del, hash));
+      return _sendOnion(relay, StoreCmd(mailboxId, await g.take(hash), deleteTag, blob).encode());
+    }));
+    log('join request to ${c.name}: ${results.where((x) => x).length}/${grants.length} copies stored');
+    _changed();
+  }
+
+  /// A join request arrived for one of our invites. Returns the delete entry,
+  /// or null if it is not a valid request for a live invite.
+  Future<DeleteEntry?> _onJoin(PendingInvite inv, Uint8List mailboxId, Uint8List blob) async {
+    final hash = await Crypto.sha256(blob);
+    final del = DeleteEntry(mailboxId, hash, await Envelope.deleteKey(inv.keys.del, hash));
+    final ephPub = JoinBlob.ephOf(blob);
+    if (ephPub == null) return null;
+    final content = await JoinBlob.open(
+      await InviteKeys.joinKey(await Crypto.x25519(inv.inviteKey, ephPub), inv.seed, inv.inviteId, ephPub),
+      inv.inviteId,
+      blob,
+    );
+    if (content == null) return null;
+    // Checked after decryption, in the lock: exactly one activation.
+    if (invites[inv.id] != inv) return del;
+    if (inv.expiredAt(DateTime.now())) {
+      cancelInvite(inv.id);
+      log('rejected a join request for an expired invite');
+      return del;
+    }
+    final PairingCode theirs;
+    try {
+      final r = ByteReader(content);
+      theirs = PairingCode.read(r);
+      if (r.remaining != 0) throw const FormatException('trailing bytes');
+    } on FormatException {
+      return del;
+    }
+    // Used up: forget the invite (and save that) before pairing, so a crash
+    // or a second request can never activate it again.
+    cancelInvite(inv.id);
+    await save();
+    log('invite used by ${theirs.name.isEmpty ? 'a friend' : theirs.name}');
+    // Outside the receive lock (root zone: the lock is reentrant per zone).
+    Zone.root.run(() => unawaited(() async {
+      try {
+        await completePairingWith(PairingSession(inv.eph, inv.seed, inv.slot, inv.text), theirs);
+      } catch (e) {
+        log('pairing by invite failed: $e');
+      }
+    }()));
+    return del;
   }
 
   /// Called after scanning the friend's code. Our own code must have been
   /// (or still be) shown to them from the same [session].
-  Future<Contact> completePairing(PairingSession session, String scanned, {String? name}) async {
-    final theirs = PairingCode.parse(scanned);
+  Future<Contact> completePairing(PairingSession session, String scanned, {String? name}) =>
+      completePairingWith(session, PairingCode.parse(scanned), name: name);
+
+  Future<Contact> completePairingWith(PairingSession session, PairingCode theirs, {String? name, PendingJoin? join}) async {
     final keys = await ConversationKeys.derive(
       myId: identity.id,
       myEph: session.eph,
@@ -434,6 +596,7 @@ class Messenger {
       theirEph: theirs.ephPub,
       slot: session.slot,
       messages: old?.messages,
+      pendingJoin: join,
     );
     if (keys.initiator) {
       final kem = await Crypto.kemGenerate();
@@ -467,6 +630,7 @@ class Messenger {
     _rewatchAll(); // the new contact's mailbox IDs
     await _refreshMailboxes();
     _changed();
+    if (join != null) await _sendJoin(c);
     unawaited(_handshakeTick(c, force: true));
     return c;
   }
@@ -507,6 +671,10 @@ class Messenger {
   bool _needsHello(Contact c) => !c.ready || (!c.keys.initiator && !c.peerConfirmed);
 
   Future<void> _handshakeTick(Contact c, {bool force = false}) async {
+    final j = c.pendingJoin;
+    if (j != null && (j.lastSent == null || DateTime.now().difference(j.lastSent!) >= timings.hello)) {
+      await _sendJoin(c);
+    }
     if (!_needsHello(c)) return;
     if (c.theirMailboxes.isEmpty) return;
     final last = c.lastHelloSent;
@@ -1132,6 +1300,16 @@ class Messenger {
         return;
       }
     }
+    for (final inv in invites.values.toList()) {
+      for (final id in await Envelope.pollIds(inv.keys.mbox, now, identity.node.pub)) {
+        if (!bytesEqual(id, mailboxId)) continue;
+        _inviteIds[hex(id)] = inv;
+        final rec = mailboxes.values.where((m) => m.own).firstOrNull ??
+            MailboxRecord((await node.localRelayInfos()).first, own: true);
+        await _pollRelay(rec, [id], const {});
+        return;
+      }
+    }
   }
 
   bool _foreground = true;
@@ -1172,7 +1350,7 @@ class Messenger {
   }
 
   Future<void> _renewWatches() async {
-    if (!_started || contacts.isEmpty) return;
+    if (!_started || (contacts.isEmpty && invites.isEmpty)) return;
     for (final rec in _currentMailboxes()) {
       if (rec.own || node.isSelf(rec.relay)) continue; // own relay: instant path
       unawaited(_watchRelay(rec));
@@ -1259,7 +1437,7 @@ class Messenger {
   Future<void> pollNow() async {
     if (!_started) return;
     try {
-      if (contacts.isEmpty) return;
+      if (contacts.isEmpty && invites.isEmpty) return;
       final now = DateTime.now();
       for (final rec in mailboxes.values.toList()) {
         final k = rec.relay.id;
@@ -1294,7 +1472,15 @@ class Messenger {
         idMap[hex(id)] = c;
       }
     }
-    return ([for (final k in idMap.keys) unhex(k)], idMap);
+    final inviteIds = <Uint8List>[];
+    for (final inv in invites.values) {
+      if (inv.expiredAt(now)) continue;
+      for (final id in await Envelope.pollIds(inv.keys.mbox, now, relayPk)) {
+        _inviteIds[hex(id)] = inv;
+        inviteIds.add(id);
+      }
+    }
+    return ([for (final k in idMap.keys) unhex(k), ...inviteIds], idMap);
   }
 
   Future<void> _pollRelay(MailboxRecord rec, List<Uint8List> ids, Map<String, Contact> idMap) async {
@@ -1355,7 +1541,10 @@ class Messenger {
   Future<DeleteEntry?> _receive(Uint8List blob, Uint8List mailboxId, Map<String, Contact> idMap) =>
       _locked(() async {
         final c = idMap[hex(mailboxId)];
-        if (c == null) return null;
+        if (c == null) {
+          final inv = _inviteIds[hex(mailboxId)];
+          return inv == null ? null : _onJoin(inv, mailboxId, blob);
+        }
         // Delete key for this copy: bound to its own blob hash.
         final hash = await Crypto.sha256(blob);
         final del = DeleteEntry(mailboxId, hash, await Envelope.deleteKey(c.keys.delIn, hash));
@@ -1363,6 +1552,8 @@ class Messenger {
         final opened = await Envelope.open(c.keys.envIn, blob);
         if (opened == null) return null;
         final (kind, content) = opened;
+        // The inviter answered: our join request has arrived.
+        if (c.pendingJoin != null) c.pendingJoin = null;
 
         // Dedup on the inner content, before the ratchet: every relay copy
         // has a different envelope, so the blob hash cannot be used.
@@ -1494,6 +1685,7 @@ class Messenger {
         _lastAnnounce = now;
         unawaited(_announce());
       }
+      _pruneInvites(now);
       await _refreshMailboxes();
       for (final c in contacts.values.toList()) {
         await _handshakeTick(c);

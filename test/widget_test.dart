@@ -80,9 +80,29 @@ void pairScreen() {
     final app = await unlockedWithFriend(tester);
     await tester.pumpWidget(ChangeNotifierProvider.value(value: app, child: const ZeltApp()));
     await tester.tap(find.text('Add friend'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('In person'));
     await tester.runAsync(() => Future.delayed(const Duration(milliseconds: 500)));
     await tester.pumpAndSettle();
     expect(find.byType(QrImageView), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('add friend offers an invite text as the second way', (tester) async {
+    final app = await unlockedWithFriend(tester);
+    await tester.pumpWidget(ChangeNotifierProvider.value(value: app, child: const ZeltApp()));
+    await tester.tap(find.text('Add friend'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('addByInvite')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('createInvite')), findsOneWidget);
+    expect(find.byKey(const Key('inviteInput')), findsOneWidget);
+    // A QR code pasted as an invite is refused with an explanation.
+    final qr = (await tester.runAsync(() => app.m.newPairingSession()))!.code;
+    await tester.enterText(find.byKey(const Key('inviteInput')), qr);
+    await tester.tap(find.byKey(const Key('joinInvite')));
+    await tester.pump();
+    expect(find.textContaining('in-person QR code'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 }

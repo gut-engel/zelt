@@ -105,6 +105,50 @@ compare it in person.
 The credential in a QR code covers indices `[0, 2048)` for sending to the owner and
 `[2048, 4096)` for the scanner's own use of that relay as a mailbox.
 
+### Invite texts (remote pairing)
+
+The second way to add a friend: the inviter sends a one-time text over any
+channel.
+
+```
+zelt-invite:1:b64( inviteId(16) invitePub(32) expires(u32, unix s) PairingCode )
+```
+
+`PairingCode` is the same body as the QR code; `invitePub` is a fresh X25519
+key whose private half stays on the inviter's device. Whitespace in the text is
+ignored (messengers wrap long lines).
+
+The joiner pastes it, completes its side of the pairing exactly as after a QR
+scan, and stores a **join request** in up to 3 of the inviter's mailboxes:
+
+```
+joinMbox = HKDF(seed_A, salt = inviteId, "zelt/invite/mbox")   # mailbox IDs, per relay and epoch as usual
+joinDel  = HKDF(seed_A, salt = inviteId, "zelt/invite/del")    # delete keys
+K        = HKDF(DH(eph_J, invitePub) ‖ seed_A, salt = inviteId ‖ eph_J, "zelt/invite/join/v1")
+blob     = eph_J(32) ‖ nonce(12) ‖ ChaCha20-Poly1305(K, len ‖ PairingCode_J ‖ pad, aad = inviteId)
+```
+
+Every copy uses a fresh nonce, `eph_J` is fresh per accepted invite, and the
+blob is `blobSize` bytes like every other blob. The request is resent every
+hello interval until the inviter answers or the invite expires. Because `K` mixes
+an exchange with the invite key, someone who reads the text after it was used
+cannot open a recorded join request.
+
+The inviter watches the invite's mailbox IDs while the invite is open. On the
+first join request that decrypts and parses, it deletes the invite and **saves
+that before** completing the pairing (so neither a second request nor a crash
+can activate it again), then pairs with `PairingCode_J` as if it had scanned it.
+The normal hybrid handshake follows. Invites live in the encrypted vault, survive
+restarts and are dropped 15 minutes after creation; the inviter's clock decides,
+and the joiner refuses texts that its own clock already sees as expired.
+
+Security: the text is a secret, like the QR code, and the channel it travels
+over carries it. Whoever reads it **before** the friend uses it can join in
+their place. Friends should compare safety numbers afterwards. `rk0` gets the
+invite seed from the text, so its post-quantum protection against a recorded
+channel only comes from the ML-KEM handshake that follows, not from optical
+secrecy as with QR codes.
+
 ## Hybrid handshake (before the ratchet)
 
 Sealed with the envelope keys, kind `0`:
@@ -406,7 +450,8 @@ Cover traffic options:
    the per-source diversity cap. This spreads useful relays quickly, but friends
    learn which relays you can reach. You can turn it off in settings. Updates go
    out automatically when your addresses or reachable relays change.
-4. **Remote pairing:** not in v1. Pairing is in person only.
+4. **Remote pairing:** by one-time invite text (see "Invite texts"), valid for
+   15 minutes and one activation. In person stays the stronger option.
 5. **Scope:** 1:1 text, up to 6000 bytes per message. No groups or files.
 6. **Platform:** Flutter for Android, with Linux and Windows builds. A headless relay runs on any Dart VM
    (`packages/zelt_core/bin/zelt_relay.dart`).

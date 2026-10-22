@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'package:zelt_core/models.dart';
 import '../app_state.dart';
 import 'chat_screen.dart';
+import 'invite_screen.dart';
 import 'network_screen.dart';
 import 'pair_screen.dart';
 import 'settings_screen.dart';
@@ -57,7 +58,7 @@ class HomeScreen extends StatelessWidget {
         floatingActionButton: FloatingActionButton.extended(
           icon: const Icon(Icons.qr_code_2),
           label: const Text('Add friend'),
-          onPressed: () => push(context, const PairScreen()),
+          onPressed: () => _addFriend(context),
         ),
       ),
     );
@@ -116,9 +117,9 @@ class _Empty extends StatelessWidget {
             Text('No friends yet', style: t.textTheme.titleLarge),
             const SizedBox(height: 8),
             const Text(
-              'zelt has no directory. Meet a friend, open "Add friend" on both '
-              'devices and scan each other\'s code. Each friend also becomes part '
-              'of your network.',
+              'zelt has no directory. Tap "Add friend": scan each other\'s QR codes '
+              'in person, or send a one-time invite text. Each friend also becomes '
+              'part of your network.',
               textAlign: TextAlign.center,
             ),
           ],
@@ -126,4 +127,34 @@ class _Empty extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Two ways to add a friend: in person (QR codes) or a one-time invite text.
+Future<void> _addFriend(BuildContext context) async {
+  final page = await showModalBottomSheet<Widget>(
+    context: context,
+    showDragHandle: true,
+    builder: (ctx) => SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ListTile(
+            leading: const Icon(Icons.qr_code_2),
+            title: const Text('In person'),
+            subtitle: const Text('Scan each other\'s QR codes. The most secure way.'),
+            onTap: () => Navigator.pop(ctx, const PairScreen()),
+          ),
+          ListTile(
+            key: const Key('addByInvite'),
+            leading: const Icon(Icons.link),
+            title: const Text('With an invite text'),
+            subtitle: const Text('Send a one-time text, valid for 15 minutes, or paste one you got.'),
+            onTap: () => Navigator.pop(ctx, const InviteScreen()),
+          ),
+          const SizedBox(height: 8),
+        ],
+      ),
+    ),
+  );
+  if (page != null && context.mounted) await push(context, page);
 }

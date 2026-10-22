@@ -4,6 +4,7 @@ import 'address.dart';
 import 'bytes.dart';
 import 'constants.dart';
 import 'crypto.dart';
+import 'invite.dart';
 import 'pairing.dart';
 import 'ratchet.dart';
 import 'tokens.dart';
@@ -125,6 +126,9 @@ class Contact {
   /// Slot on our relay reserved for this contact (0 = none yet).
   int slot;
 
+  /// Joined by invite text: our join request, until the inviter answers.
+  PendingJoin? pendingJoin;
+
   DateTime? lastHelloSent;
   DateTime? lastUpdateSent;
   DateTime? lastUpdateRequest;
@@ -148,6 +152,7 @@ class Contact {
     List<RelayInfo>? theirRelays,
     List<Credential>? theirMailboxes,
     this.slot = 0,
+    this.pendingJoin,
     this.lastHelloSent,
     this.lastUpdateSent,
     this.lastUpdateRequest,
@@ -182,6 +187,7 @@ class Contact {
     'theirRelays': [for (final r in theirRelays) r.toJson()],
     'theirMailboxes': [for (final g in theirMailboxes) g.toJson()],
     'slot': slot,
+    if (pendingJoin != null) 'pj': pendingJoin!.toJson(),
     if (lastHelloSent != null) 'lhs': lastHelloSent!.millisecondsSinceEpoch,
     if (lastUpdateSent != null) 'lus': lastUpdateSent!.millisecondsSinceEpoch,
     if (lastUpdateRequest != null) 'lur': lastUpdateRequest!.millisecondsSinceEpoch,
@@ -208,6 +214,7 @@ class Contact {
     theirRelays: [for (final r in j['theirRelays'] ?? []) RelayInfo.fromJson(r)],
     theirMailboxes: [for (final g in j['theirMailboxes'] ?? []) Credential.fromJson(g)],
     slot: j['slot'] ?? 0,
+    pendingJoin: j['pj'] == null ? null : PendingJoin.fromJson(j['pj']),
     lastHelloSent: _t(j['lhs']),
     lastUpdateSent: _t(j['lus']),
     lastUpdateRequest: _t(j['lur']),
