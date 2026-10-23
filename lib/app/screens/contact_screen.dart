@@ -90,6 +90,15 @@ class ContactScreen extends StatelessWidget {
             value: c.verified,
             onChanged: (v) => m.setVerified(c.id, v),
           ),
+          SwitchListTile(
+            key: const Key('contactPrivate'),
+            contentPadding: EdgeInsets.zero,
+            secondary: const Icon(Icons.lock_outline),
+            title: const Text('Private chat'),
+            subtitle: const Text('Hidden without a trace when zelt is opened with the duress PIN'),
+            value: c.private,
+            onChanged: (v) => context.read<AppState>().setPrivate(c.id, v),
+          ),
           const Divider(),
           ListTile(
             contentPadding: EdgeInsets.zero,

@@ -17,6 +17,20 @@ See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the wire format and design choices.
   first time you send it to a friend, after that only its hash. Tap a friend's
   sticker to add it to your own; photos and stickers can be saved to the
   device, rebuilt from pixels so the gallery never sees received bytes.
+- Group chats (up to 32 members) with text, photos, stickers, replies and
+  reactions. Members do not have to be friends with each other: posts are
+  signed by their author and passed on by the members who are. Only the admin
+  changes who is in a group.
+- Replies and emoji reactions in every chat.
+- Encrypted backups to your own WebDAV or SFTP server, an S3-compatible bucket
+  or a file, readable only with a 12-word backup phrase the device does not
+  keep. Daily, small (compressed; pictures uploaded once), no message keys
+  inside. "Restore from backup" on a new phone brings back the identity,
+  friends, groups and chats; friends' apps start new sessions with it, and the
+  old phone stops by itself.
+- Private chats and a duress PIN: chats marked private are kept in a separate
+  part of the vault that only the real PIN opens. The duress PIN opens zelt
+  without them, without a trace, and nothing shows that a duress PIN exists.
 - Profile pictures that only verified friends see: yours goes to a friend only
   after you marked their safety number as matching, and is taken back if you
   un-verify them. Theirs shows only once you verified them too.
@@ -35,13 +49,15 @@ See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the wire format and design choices.
   is reachable, zelt probes the whole history until one relay answers.
 - Light, dark or system theme.
 - Delay modes (fast, normal, paranoid) and cover traffic (off, low, constant).
-- An encrypted vault with an Argon2id-stretched PIN, and no cloud backup.
+- An encrypted vault with an Argon2id-stretched PIN, bound to the phone's
+  hardware key on Android.
 
 ## Layout
 
 ```
 packages/zelt_core/lib/   protocol (pure Dart): sphinx, link, ratchet, pairing,
-                          tokens, relay_store, dht, peers, node, messenger, vault
+                          tokens, relay_store, dht, peers, node, messenger, vault,
+                          groups, state_split, phrase, backup, backup_targets
 packages/zelt_core/bin/   zelt_relay.dart (headless relay), zelt_peer.dart (USB test peer)
 lib/app/         Flutter UI and the Android service bridge
 relay/           Dockerfile for the public relay
@@ -151,7 +167,7 @@ services:
   zelt-relay:
     build:
       # A pinned release. Update: change the tag, run the same command again.
-      context: https://github.com/gut-engel/zelt.git#v1.0.6
+      context: https://github.com/gut-engel/zelt.git#v1.0.7
       dockerfile: relay/Dockerfile
     image: zelt-relay
     container_name: zelt-relay
@@ -229,8 +245,8 @@ echo "send hello" >> peer.cmd; echo status >> peer.cmd
 ## Trying it
 
 1. Install on two phones on the same Wi-Fi. Relaying is on by default.
-2. On both phones, open **Add friend**, scan each other's code, then compare the
-   safety numbers.
+2. On one phone, tap **New chat → In person** and let the other scan the code,
+   then compare the safety numbers.
 3. The chat shows "Setting up encryption…" until the post-quantum handshake
    finishes, which takes one round trip.
 

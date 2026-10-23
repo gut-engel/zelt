@@ -6,6 +6,7 @@ import 'package:zelt_core/constants.dart';
 import 'package:zelt_core/models.dart';
 import '../app_state.dart';
 import '../media_codec.dart';
+import 'backup_screens.dart';
 import 'chat_screen.dart' show imageFiles;
 import '../updater.dart';
 import 'network_screen.dart';
@@ -14,37 +15,101 @@ import 'widgets.dart';
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
 
-  Future<void> _changePin(BuildContext context) async {
+  /// Asks for a new PIN twice. Null if cancelled.
+  static Future<String?> _askPin(BuildContext context, String title, {String? explain, String action = 'Save'}) {
     final a = TextEditingController();
     final b = TextEditingController();
-    final pin = await showDialog<String>(
+    String? error;
+    return showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Change PIN'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(controller: a, obscureText: true, decoration: const InputDecoration(labelText: 'New PIN')),
-            const SizedBox(height: 12),
-            TextField(controller: b, obscureText: true, decoration: const InputDecoration(labelText: 'Repeat')),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setState) => AlertDialog(
+          title: Text(title),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (explain != null) ...[Text(explain), const SizedBox(height: 12)],
+              TextField(key: const Key('pinA'), controller: a, obscureText: true, decoration: const InputDecoration(labelText: 'New PIN')),
+              const SizedBox(height: 12),
+              TextField(
+                key: const Key('pinB'),
+                controller: b,
+                obscureText: true,
+                decoration: InputDecoration(labelText: 'Repeat', errorText: error),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            FilledButton(
+              key: const Key('pinSave'),
+              onPressed: () {
+                if (a.text.length < 6) {
+                  setState(() => error = 'Use at least 6 characters');
+                } else if (a.text != b.text) {
+                  setState(() => error = 'The two entries differ');
+                } else {
+                  Navigator.pop(ctx, a.text);
+                }
+              },
+              child: Text(action),
+            ),
           ],
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          FilledButton(
-            onPressed: () {
-              if (a.text.length >= 6 && a.text == b.text) Navigator.pop(ctx, a.text);
-            },
-            child: const Text('Change'),
-          ),
-        ],
       ),
     );
-    if (pin != null && context.mounted) {
+  }
+
+  static void _toast(BuildContext context, String text) {
+    if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  Future<void> _changePin(BuildContext context) async {
+    final pin = await _askPin(context, 'Change PIN', action: 'Change');
+    if (pin == null || !context.mounted) return;
+    try {
       await context.read<AppState>().changePin(pin);
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('PIN changed')));
-      }
+      if (context.mounted) _toast(context, 'PIN changed');
+    } on ArgumentError {
+      if (context.mounted) _toast(context, 'Choose a different PIN: that one is already in use');
+    }
+  }
+
+  Future<void> _duressPin(BuildContext context) async {
+    final app = context.read<AppState>();
+    String? choice = 'set';
+    if (app.duressPinSet) {
+      choice = await showModalBottomSheet<String>(
+        context: context,
+        builder: (ctx) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(leading: const Icon(Icons.password), title: const Text('Change duress PIN'), onTap: () => Navigator.pop(ctx, 'set')),
+              ListTile(leading: const Icon(Icons.delete_outline), title: const Text('Remove duress PIN'), onTap: () => Navigator.pop(ctx, 'clear')),
+            ],
+          ),
+        ),
+      );
+    }
+    if (choice == null || !context.mounted) return;
+    if (choice == 'clear') {
+      await app.clearDuressPin();
+      if (context.mounted) _toast(context, 'Duress PIN removed');
+      return;
+    }
+    final pin = await _askPin(
+      context,
+      'Duress PIN',
+      explain: 'Entered instead of your PIN, it opens zelt with every chat marked private hidden, '
+          'without a trace. Mark chats private on their contact or group screen.',
+    );
+    if (pin == null || !context.mounted) return;
+    try {
+      await app.setDuressPin(pin);
+      if (context.mounted) _toast(context, 'Duress PIN set');
+    } on ArgumentError {
+      if (context.mounted) _toast(context, 'The duress PIN must differ from your PIN');
     }
   }
 
@@ -235,6 +300,22 @@ class SettingsScreen extends StatelessWidget {
                   : () => app.update != null ? app.installUpdate() : app.checkForUpdate(manual: true),
             ),
           ],
+          _Header('Backup'),
+          ListTile(
+            key: const Key('backupSettings'),
+            leading: const Icon(Icons.cloud_sync_outlined),
+            title: const Text('Backup'),
+            subtitle: Text(switch (app.backup) {
+              null => '',
+              final b when !b.configured => 'Not set up',
+              final b when b.targets.isEmpty => 'No destination yet',
+              final b when b.lastRun == null => 'No backup made yet',
+              final b => 'Last backup ${shortTime(b.lastRun!)} · ${b.targets.length} destination${b.targets.length == 1 ? '' : 's'}',
+            }),
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute(settings: const RouteSettings(name: 'backup'), builder: (_) => const BackupSettingsScreen()),
+            ),
+          ),
           _Header('This device'),
           const _ProfilePictureTile(),
           ListTile(
@@ -267,6 +348,16 @@ class SettingsScreen extends StatelessWidget {
             }),
           ),
           ListTile(title: const Text('Change PIN'), onTap: () => _changePin(context)),
+          ListTile(
+            key: const Key('duressPin'),
+            title: const Text('Duress PIN'),
+            subtitle: Text(
+              app.duressPinSet
+                  ? 'Set. It opens zelt without your private chats.'
+                  : 'A second PIN that opens zelt with private chats hidden',
+            ),
+            onTap: () => _duressPin(context),
+          ),
           ListTile(
             title: const Text('Lock now'),
             subtitle: const Text('Stops the relay and clears keys from memory'),

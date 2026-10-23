@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import 'app/app_state.dart';
+import 'app/screens/backup_screens.dart';
 import 'app/screens/home_screen.dart';
 import 'app/screens/lock_screens.dart';
 
@@ -49,10 +50,14 @@ class _Root extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final phase = context.select<AppState, Phase>((s) => s.phase);
+    final superseded = context.select<AppState, bool>((s) => s.messenger?.superseded ?? false);
+    final offerBackup = context.select<AppState, bool>((s) => s.offerBackup);
     return switch (phase) {
       Phase.loading => const Scaffold(body: Center(child: CircularProgressIndicator())),
       Phase.setup => const SetupScreen(),
       Phase.locked => const UnlockScreen(),
+      Phase.unlocked when superseded => const SupersededScreen(),
+      Phase.unlocked when offerBackup => const BackupIntroScreen(),
       Phase.unlocked => const HomeScreen(),
     };
   }

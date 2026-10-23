@@ -79,6 +79,22 @@ class Message {
   /// An image or sticker ([text] is the image caption).
   final MediaRef? media;
 
+  /// The message this one answers (its id).
+  final String? replyTo;
+
+  /// Reactions by who reacted ([me], a contact id, or in a group a member's
+  /// identity key): the emoji and the reactor's clock. An empty emoji is a
+  /// removed reaction, kept so that an older one arriving late cannot
+  /// bring it back.
+  final Map<String, (String, int)> reactions;
+
+  /// Group messages: the author's identity key (hex), and the contact that
+  /// delivered it (the author, or a member who passed it on).
+  final String? author;
+  final String? via;
+
+  static const me = 'me';
+
   Message({
     required this.id,
     required this.outgoing,
@@ -87,7 +103,25 @@ class Message {
     this.sentAt,
     this.status = MsgStatus.queued,
     this.media,
-  });
+    this.replyTo,
+    Map<String, (String, int)>? reactions,
+    this.author,
+    this.via,
+  }) : reactions = reactions ?? {};
+
+  /// Applies a reaction unless a newer one by the same person is known.
+  bool react(String who, String emoji, int ts) {
+    final old = reactions[who];
+    if (old != null && old.$2 >= ts) return false;
+    reactions[who] = (emoji, ts);
+    return true;
+  }
+
+  /// Current reactions (removed ones left out), by who reacted.
+  Map<String, String> get shownReactions => {
+    for (final e in reactions.entries)
+      if (e.value.$1.isNotEmpty) e.key: e.value.$1,
+  };
 
   Map<String, dynamic> toJson() => {
     'id': id,
@@ -97,6 +131,10 @@ class Message {
     if (sentAt != null) 'sa': sentAt!.millisecondsSinceEpoch,
     's': status.name,
     if (media != null) 'm': media!.toJson(),
+    if (replyTo != null) 'rt': replyTo,
+    if (reactions.isNotEmpty) 'rx': {for (final e in reactions.entries) e.key: [e.value.$1, e.value.$2]},
+    if (author != null) 'au': author,
+    if (via != null) 'via': via,
   };
 
   factory Message.fromJson(Map<String, dynamic> j) => Message(
@@ -107,6 +145,13 @@ class Message {
     sentAt: j['sa'] == null ? null : DateTime.fromMillisecondsSinceEpoch(j['sa']),
     status: MsgStatus.values.byName(j['s']),
     media: j['m'] == null ? null : MediaRef.fromJson(j['m']),
+    replyTo: j['rt'],
+    reactions: {
+      for (final e in (j['rx'] as Map<String, dynamic>? ?? {}).entries)
+        e.key: ((e.value as List)[0] as String, (e.value as List)[1] as int),
+    },
+    author: j['au'],
+    via: j['via'],
   );
 }
 
@@ -153,6 +198,22 @@ class Contact {
   /// Hash of the profile picture we last sent them (null: none, or removed).
   String? avatarSent;
 
+  /// Hidden behind the duress PIN: stored apart from everything else, in a
+  /// part of the vault only the real PIN opens.
+  bool private;
+
+  /// Session epoch: raised when one side restarts the key exchange (after a
+  /// restore from backup). A hello from a higher epoch resets the session.
+  int epoch;
+
+  /// We raised [epoch] (restored here), not the contact.
+  bool epochMine;
+
+  /// When the contact last restarted the session (RAM only): for a while
+  /// after that we keep saying so, so that a device the contact's identity
+  /// left behind learns it and stops.
+  DateTime? peerResetAt;
+
   DateTime? lastHelloSent;
   DateTime? lastUpdateSent;
   DateTime? lastUpdateRequest;
@@ -180,6 +241,9 @@ class Contact {
     List<String>? sentMedia,
     this.theirAvatar,
     this.avatarSent,
+    this.private = false,
+    this.epoch = 0,
+    this.epochMine = false,
     this.lastHelloSent,
     this.lastUpdateSent,
     this.lastUpdateRequest,
@@ -223,6 +287,9 @@ class Contact {
     if (sentMedia.isNotEmpty) 'sm': sentMedia,
     if (theirAvatar != null) 'av': theirAvatar!.toJson(),
     if (avatarSent != null) 'avs': avatarSent,
+    if (private) 'private': true,
+    if (epoch != 0) 'ep': epoch,
+    if (epochMine) 'em': true,
     if (lastHelloSent != null) 'lhs': lastHelloSent!.millisecondsSinceEpoch,
     if (lastUpdateSent != null) 'lus': lastUpdateSent!.millisecondsSinceEpoch,
     if (lastUpdateRequest != null) 'lur': lastUpdateRequest!.millisecondsSinceEpoch,
@@ -253,6 +320,9 @@ class Contact {
     sentMedia: (j['sm'] as List? ?? []).cast<String>(),
     theirAvatar: j['av'] == null ? null : MediaRef.fromJson(j['av']),
     avatarSent: j['avs'],
+    private: j['private'] ?? false,
+    epoch: j['ep'] ?? 0,
+    epochMine: j['em'] ?? false,
     lastHelloSent: _t(j['lhs']),
     lastUpdateSent: _t(j['lus']),
     lastUpdateRequest: _t(j['lur']),
@@ -286,6 +356,9 @@ class OutItem {
   final bool handshake;
   final bool needsReceipt;
 
+  /// A group post to one member: "groupId/messageId", for its delivery state.
+  final String? groupMsg;
+
   /// Plaintext waiting for the ratchet (only before the handshake is done).
   Uint8List? pending;
 
@@ -303,6 +376,7 @@ class OutItem {
     required this.contactId,
     this.handshake = false,
     this.needsReceipt = true,
+    this.groupMsg,
     this.pending,
     this.inner,
     this.legacyBlob,
@@ -317,6 +391,7 @@ class OutItem {
     'c': contactId,
     'h': handshake,
     'r': needsReceipt,
+    if (groupMsg != null) 'gm': groupMsg,
     if (pending != null) 'p': b64(pending!),
     if (inner != null) 'i': b64(inner!),
     if (legacyBlob != null) 'b': b64(legacyBlob!),
@@ -330,6 +405,7 @@ class OutItem {
     contactId: j['c'],
     handshake: j['h'] ?? false,
     needsReceipt: j['r'] ?? true,
+    groupMsg: j['gm'],
     pending: j['p'] == null ? null : unb64(j['p']),
     inner: j['i'] == null ? null : unb64(j['i']),
     legacyBlob: j['b'] == null ? null : unb64(j['b']),

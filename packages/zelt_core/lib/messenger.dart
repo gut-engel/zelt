@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math' show Random, min, pow;
+import 'dart:math' show Random, max, min, pow;
 import 'dart:math' as math show log;
 import 'dart:typed_data';
 
@@ -10,6 +10,7 @@ import 'bytes.dart';
 import 'constants.dart';
 import 'crypto.dart';
 import 'envelope.dart';
+import 'groups.dart';
 import 'invite.dart';
 import 'media.dart';
 import 'messages.dart';
@@ -157,6 +158,28 @@ class Messenger {
   /// The user's own sticker library, newest last.
   final List<MediaRef> stickers = [];
 
+  /// Group chats (see groups.dart), by group ID.
+  final Map<String, Group> groups = {};
+
+  /// Media we passed on in a group before its bytes were here: who gets them
+  /// once they are.
+  final Map<String, Set<String>> _forwardPending = {};
+
+  /// Blobs we failed to decrypt (logged once each).
+  final Set<String> _undecryptable = {};
+
+  /// Opaque app data kept with the state (backup settings).
+  Map<String, dynamic> appData = {};
+
+  void setAppData(String key, Object? value) {
+    if (value == null) {
+      appData.remove(key);
+    } else {
+      appData[key] = value;
+    }
+    _changed();
+  }
+
   final Map<String, _Transfer> _transfers = {};
   final Set<String> _haveMedia = {};
   final Map<String, DateTime> _lastServed = {};
@@ -183,6 +206,14 @@ class Messenger {
 
   /// A text message arrived.
   void Function(Contact c, Message m)? onIncoming;
+
+  /// A group message, or an invitation to a group, arrived.
+  void Function(Group g, Message? m)? onIncomingGroup;
+
+  /// This identity was restored on another device, which now holds the
+  /// sessions: this one stopped and must not be used any more.
+  bool superseded = false;
+  void Function()? onSuperseded;
 
   Messenger({
     required this.identity,
@@ -281,6 +312,9 @@ class Messenger {
     'mailboxes': [for (final m in mailboxes.values) m.toJson()],
     'invites': [for (final i in invites.values) i.toJson()],
     'stickers': [for (final s in stickers) s.toJson()],
+    if (groups.isNotEmpty) 'groups': [for (final g in groups.values) g.toJson()],
+    if (appData.isNotEmpty) 'app': appData,
+    if (superseded) 'superseded': true,
     'nextSlot': nextSlot,
     'advertised': _advertised.toList(),
     'certs': node.certs.toJson(),
@@ -336,9 +370,54 @@ class Messenger {
       m.invites[inv.id] = inv;
     }
     m.stickers.addAll([for (final s in j['stickers'] ?? []) MediaRef.fromJson(s)]);
+    for (final g in j['groups'] ?? []) {
+      final group = Group.fromJson(g);
+      m.groups[group.id] = group;
+    }
+    m.appData = Map<String, dynamic>.of(j['app'] as Map<String, dynamic>? ?? {});
+    m.superseded = j['superseded'] == true;
     m._advertised = {...(j['advertised'] as List? ?? []).cast<String>()};
     m.node.certs.loadJson(j['certs'] as List? ?? []);
     if (j['peers'] != null) m.peers.loadJson(j['peers']);
+    return m;
+  }
+
+  /// What a backup holds: everything needed to carry on, minus what is
+  /// rebuilt anyway (outbox, dedup table, open invites, onion-key
+  /// certificates) and minus every session secret: ratchets and pending key
+  /// exchanges are left out, so a backup never contains message keys. A
+  /// restore starts new sessions ([restore]).
+  Map<String, dynamic> backupJson() {
+    final j = toJson();
+    for (final k in const ['outbox', 'seen', 'invites', 'certs', 'advertised', 'superseded']) {
+      j.remove(k);
+    }
+    j['contacts'] = [
+      for (final c in j['contacts'] as List)
+        Map<String, dynamic>.of(c as Map<String, dynamic>)
+          ..remove('ratchet')
+          ..remove('kemPk')
+          ..remove('kemSk')
+          ..remove('kemCt')
+          ..remove('lhs')
+          ..remove('lus')
+          ..remove('lur')
+          ..remove('peerConfirmed'),
+    ];
+    return j;
+  }
+
+  /// A messenger from a backup ([backupJson]), with new sessions started
+  /// for every contact.
+  static Future<Messenger> restore(
+    Map<String, dynamic> backup, {
+    Timings timings = const Timings(),
+    InternetAddress? bindAddress,
+    bool advertiseLoopback = false,
+  }) async {
+    final m = await load(backup, timings: timings, bindAddress: bindAddress, advertiseLoopback: advertiseLoopback);
+    await m.restartSessions();
+    m.log('restored from a backup: ${m.contacts.length} contacts, ${m.groups.length} groups');
     return m;
   }
 
@@ -362,7 +441,7 @@ class Messenger {
   }
 
   Future<void> start() async {
-    if (_started) return;
+    if (_started || superseded) return;
     _started = true;
     await _migrateOutbox();
     await node.start(relay: settings.relay);
@@ -710,6 +789,21 @@ class Messenger {
     _changed();
   }
 
+  /// Marks a chat as private: it is hidden behind the duress PIN.
+  void setContactPrivate(String id, bool v) {
+    final c = contacts[id];
+    if (c == null || c.private == v) return;
+    c.private = v;
+    _changed();
+  }
+
+  void setGroupPrivate(String id, bool v) {
+    final g = groups[id];
+    if (g == null || g.private == v) return;
+    g.private = v;
+    _changed();
+  }
+
   void renameContact(String id, String name) {
     contacts[id]?.name = name;
     _changed();
@@ -741,9 +835,16 @@ class Messenger {
   Uint8List _ad(Contact c) =>
       c.keys.initiator ? concat([identity.id.pub, c.idPub]) : concat([c.idPub, identity.id.pub]);
 
-  bool _needsHello(Contact c) => !c.ready || (!c.keys.initiator && !c.peerConfirmed);
+  bool _needsHello(Contact c) =>
+      !c.ready ||
+      (!c.keys.initiator && !c.peerConfirmed) ||
+      (c.peerResetAt != null && DateTime.now().difference(c.peerResetAt!) < _announceReset);
+
+  /// How long hellos keep announcing a session the contact restarted.
+  static const _announceReset = Duration(minutes: 10);
 
   Future<void> _handshakeTick(Contact c, {bool force = false}) async {
+    if (!_started) return;
     final j = c.pendingJoin;
     if (j != null && (j.lastSent == null || DateTime.now().difference(j.lastSent!) >= timings.hello)) {
       await _sendJoin(c);
@@ -757,6 +858,8 @@ class Messenger {
       kemPk: c.keys.initiator && !c.ready ? c.kemPk : null,
       kemCt: !c.keys.initiator ? c.kemCt : null,
       info: await _addressInfoFor(c),
+      epoch: c.epoch,
+      raisedBy: c.epoch == 0 ? 0 : (c.epochMine ? Hello.raisedBySender : Hello.raisedByReceiver),
     );
     final item = OutItem(
       id: hex(randomBytes(16)),
@@ -770,6 +873,22 @@ class Messenger {
   }
 
   Future<void> _onHello(Contact c, Hello h) async {
+    // A hello from an older session (delayed, or replayed) changes nothing;
+    // one from a newer session means the friend restarted it (a restore).
+    if (h.epoch < c.epoch) {
+      log('ignored a hello from an older session with ${c.name}');
+      return;
+    }
+    if (h.epoch > c.epoch) {
+      if (h.raisedBy == Hello.raisedByReceiver) {
+        // The friend answers a restart "we" made, but not on this device:
+        // this identity was restored elsewhere. Competing for the sessions
+        // would break both devices, so this one stops for good.
+        _supersede(c);
+        return;
+      }
+      await _resetSession(c, h.epoch);
+    }
     await _applyInfo(c, h.info);
     if (h.kemPk != null && !c.keys.initiator) {
       if (!c.ready) {
@@ -1010,16 +1129,17 @@ class Messenger {
 
   // --- Sending ---------------------------------------------------------
 
-  /// Queues a text message. Returns the stored [Message].
-  Future<Message> sendText(String contactId, String text) async {
+  /// Queues a text message, optionally answering [replyTo] (a message ID in
+  /// this chat). Returns the stored [Message].
+  Future<Message> sendText(String contactId, String text, {String? replyTo}) async {
     final c = contacts[contactId];
     if (c == null) throw StateError('unknown contact');
     if (utf8.encode(text).length > maxTextBytes) throw ArgumentError('message too long');
     final id = randomBytes(16);
     final now = DateTime.now();
-    final m = Message(id: hex(id), outgoing: true, text: text, time: now);
+    final m = Message(id: hex(id), outgoing: true, text: text, time: now, replyTo: _replyIn(c.messages, replyTo));
     c.messages.add(m);
-    final chat = ChatMsg(MsgType.text, id, timestamp: now.millisecondsSinceEpoch, text: text);
+    final chat = _chatFor(m);
     final item = OutItem(id: hex(id), contactId: c.id, pending: chat.encode());
     outbox.add(item);
     _changed();
@@ -1030,10 +1150,47 @@ class Messenger {
     return m;
   }
 
+  /// Only an existing message of the same chat can be answered.
+  static String? _replyIn(List<Message> msgs, String? id) =>
+      id != null && msgs.any((m) => m.id == id) ? id : null;
+
+  /// The wire form of one of our own messages (text, image or sticker),
+  /// identical every time it is built: resending after a session reset, and
+  /// re-signing a group post, give the same bytes.
+  static ChatMsg _chatFor(Message m) {
+    final media = m.media;
+    final type = media == null
+        ? MsgType.text
+        : media.kind == MediaKind.sticker
+        ? MsgType.sticker
+        : MsgType.image;
+    return ChatMsg(
+      type,
+      unhex(m.id),
+      timestamp: (m.sentAt ?? m.time).millisecondsSinceEpoch,
+      text: type == MsgType.sticker ? '' : m.text,
+      media: media,
+      replyTo: m.replyTo == null ? null : unhex(m.replyTo!),
+    );
+  }
+
+  /// Reacts to a message in a chat with one emoji ('' removes our reaction).
+  Future<void> react(String contactId, String messageId, String emoji) async {
+    final c = contacts[contactId];
+    if (c == null) throw StateError('unknown contact');
+    if (!ChatMsg.validReaction(emoji)) throw ArgumentError('not a reaction');
+    final msg = c.messages.where((m) => m.id == messageId).firstOrNull;
+    if (msg == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    msg.react(Message.me, emoji, now);
+    _changed();
+    await _enqueue(c, ChatMsg(MsgType.reaction, randomBytes(16), timestamp: now, target: unhex(messageId), text: emoji));
+  }
+
   // --- Images and stickers --------------------------------------------
 
-  Future<void> _enqueue(Contact c, ChatMsg chat) async {
-    final item = OutItem(id: hex(chat.id), contactId: c.id, pending: chat.encode());
+  Future<void> _enqueue(Contact c, ChatMsg chat, {String? groupMsg}) async {
+    final item = OutItem(id: hex(chat.id), contactId: c.id, pending: chat.encode(), groupMsg: groupMsg);
     outbox.add(item);
     _changed();
     if (c.ready) {
@@ -1086,7 +1243,14 @@ class Messenger {
   }
 
   /// Sends a WebP the app already scaled and re-encoded (metadata stripped).
-  Future<Message> sendImage(String contactId, Uint8List webp, {required int width, required int height, String caption = ''}) async {
+  Future<Message> sendImage(
+    String contactId,
+    Uint8List webp, {
+    required int width,
+    required int height,
+    String caption = '',
+    String? replyTo,
+  }) async {
     final c = contacts[contactId];
     if (c == null) throw StateError('unknown contact');
     if (utf8.encode(caption).length > maxTextBytes ~/ 2) throw ArgumentError('caption too long');
@@ -1094,10 +1258,10 @@ class Messenger {
     await _store(ref.id, webp);
     final id = randomBytes(16);
     final now = DateTime.now();
-    final m = Message(id: hex(id), outgoing: true, text: caption, time: now, media: ref);
+    final m = Message(id: hex(id), outgoing: true, text: caption, time: now, media: ref, replyTo: _replyIn(c.messages, replyTo));
     c.messages.add(m);
     _rememberSent(c, ref.id);
-    await _enqueue(c, ChatMsg(MsgType.image, id, timestamp: now.millisecondsSinceEpoch, text: caption, media: ref));
+    await _enqueue(c, _chatFor(m));
     await _sendChunks(c, ref.id, webp);
     return m;
   }
@@ -1170,26 +1334,534 @@ class Messenger {
   }
 
   /// Sends a sticker as its hash only; a friend without it asks us for it.
-  Future<Message> sendSticker(String contactId, MediaRef ref) async {
+  Future<Message> sendSticker(String contactId, MediaRef ref, {String? replyTo}) async {
     final c = contacts[contactId];
     if (c == null) throw StateError('unknown contact');
     if (ref.kind != MediaKind.sticker || !await hasMedia(ref.id)) throw ArgumentError('unknown sticker');
-    // A friend who sent it to us, or got it from us, has it: hash only.
-    // Otherwise the bytes follow right away, saving a request round trip.
-    final known = c.sentMedia.contains(ref.id) || c.messages.any((x) => !x.outgoing && x.media?.id == ref.id);
     final id = randomBytes(16);
     final now = DateTime.now();
-    final m = Message(id: hex(id), outgoing: true, text: '', time: now, media: ref);
+    final m = Message(id: hex(id), outgoing: true, text: '', time: now, media: ref, replyTo: _replyIn(c.messages, replyTo));
+    // Before the message is added: a sticker we send is not "from them".
+    final known = _stickerKnownBy(c, ref.id);
     c.messages.add(m);
     _rememberSent(c, ref.id);
-    await _enqueue(c, ChatMsg(MsgType.sticker, id, timestamp: now.millisecondsSinceEpoch, media: ref));
-    final bytes = known ? null : await media.read(ref.id);
-    if (bytes != null) {
-      // Counts as served: a request racing the push is not answered twice.
-      _lastServed['${c.id}/${ref.id}'] = now;
-      await _sendChunks(c, ref.id, bytes);
+    await _enqueue(c, _chatFor(m));
+    if (!known) await _pushMedia(c, ref.id);
+    return m;
+  }
+
+  /// A friend who sent a sticker to us, or got it from us (here or in a
+  /// group), has it: it travels as its hash only.
+  bool _stickerKnownBy(Contact c, String hash) =>
+      c.sentMedia.contains(hash) ||
+      c.messages.any((x) => !x.outgoing && x.media?.id == hash) ||
+      groups.values.any((g) => g.messages.any((x) => x.via == c.id && x.media?.id == hash));
+
+  /// Sends media bytes to a friend right away (no request round trip).
+  Future<void> _pushMedia(Contact c, String hash) async {
+    final bytes = await media.read(hash);
+    if (bytes == null) return;
+    // Counts as served: a request racing the push is not answered twice.
+    _lastServed['${c.id}/$hash'] = DateTime.now();
+    await _sendChunks(c, hash, bytes);
+  }
+
+  // --- Groups ----------------------------------------------------------
+
+  String get _myId => hex(identity.id.pub);
+
+  String _memberName() {
+    final n = cleanName(settings.name, maxMemberNameBytes);
+    return n.isEmpty ? 'Member ${_myId.substring(0, 4)}' : n;
+  }
+
+  /// Creates a group with us as its admin and invites [contactIds].
+  Future<Group> createGroup(String name, Iterable<String> contactIds) async {
+    final n = cleanName(name, maxGroupNameBytes);
+    if (n.isEmpty) throw ArgumentError('the group needs a name');
+    final key = await Crypto.ed25519Generate();
+    final gid = randomBytes(16);
+    final roster = await Roster.sign(
+      key,
+      groupId: gid,
+      version: 1,
+      name: n,
+      members: [GroupMember(identity.id.pub, key.pub, _memberName())],
+    );
+    final g = Group(id: hex(gid), roster: roster, state: GroupState.member, signKey: key);
+    groups[g.id] = g;
+    log('group "$n" created');
+    _changed();
+    await inviteToGroup(g.id, contactIds);
+    return g;
+  }
+
+  /// Admin: invites contacts. They become members once they accept.
+  Future<void> inviteToGroup(String groupId, Iterable<String> contactIds) async {
+    final g = groups[groupId];
+    if (g == null || !g.isAdmin || !g.active || g.roster.closed) throw StateError('only the group admin can invite');
+    final fresh = [
+      for (final id in contactIds.toSet())
+        if (contacts[id] != null && g.roster.member(id) == null && !g.pendingInvites.contains(id)) contacts[id]!,
+    ];
+    if (g.roster.members.length + g.pendingInvites.length + fresh.length > maxGroupMembers) {
+      throw StateError('a group has at most $maxGroupMembers members');
+    }
+    for (final c in fresh) {
+      g.pendingInvites.add(c.id);
+      await _enqueue(c, ChatMsg(MsgType.groupInvite, randomBytes(16), payload: g.roster.encode()));
+    }
+    _changed();
+  }
+
+  /// Accepts an invitation: sends the admin our signing key for the group.
+  Future<void> acceptGroupInvite(String groupId) async {
+    final g = groups[groupId];
+    if (g == null || g.state != GroupState.invited) return;
+    final admin = contacts[g.invitedBy];
+    if (admin == null) throw StateError('the friend who invited you is no longer a contact');
+    // A fresh key for every membership: a re-joined group cannot be linked
+    // to the earlier membership by its key.
+    final key = await Crypto.ed25519Generate();
+    g.signKey = key;
+    g.state = GroupState.joining;
+    _changed();
+    await _enqueue(
+      admin,
+      ChatMsg(MsgType.groupJoin, randomBytes(16), payload: GroupJoin(g.roster.groupId, key.pub, _memberName()).encode()),
+    );
+  }
+
+  /// Declines an invitation and forgets the group.
+  Future<void> declineGroupInvite(String groupId) async {
+    final g = groups[groupId];
+    if (g == null || g.state != GroupState.invited) return;
+    groups.remove(groupId);
+    _changed();
+    final admin = contacts[g.invitedBy];
+    if (admin != null) await _enqueue(admin, ChatMsg(MsgType.groupLeave, randomBytes(16), payload: g.roster.groupId));
+  }
+
+  /// Leaves a group. The admin leaving closes it: members keep talking, but
+  /// nobody can be added or removed any more.
+  Future<void> leaveGroup(String groupId) async {
+    final g = groups[groupId];
+    if (g == null || !(g.state == GroupState.member || g.state == GroupState.joining)) return;
+    if (g.isAdmin) {
+      g.pendingInvites.clear();
+      g.state = GroupState.left;
+      await _updateRoster(g, g.roster.members.toList(), closed: true);
+    } else {
+      g.state = GroupState.left;
+      _changed();
+      final admin = contacts[g.roster.admin!.id];
+      if (admin != null) await _enqueue(admin, ChatMsg(MsgType.groupLeave, randomBytes(16), payload: g.roster.groupId));
+    }
+    log('left group "${g.name}"');
+  }
+
+  /// Admin: removes a member (or withdraws an invitation).
+  Future<void> removeFromGroup(String groupId, String memberId) async {
+    final g = groups[groupId];
+    if (g == null || !g.isAdmin || !g.active || g.roster.closed) throw StateError('only the group admin can remove members');
+    if (memberId == _myId) return;
+    g.pendingInvites.remove(memberId);
+    _changed();
+    if (g.roster.member(memberId) == null) return;
+    // The removed member gets the new list too, so they know.
+    await _updateRoster(g, g.roster.members.where((m) => m.id != memberId).toList(), alsoTo: [memberId]);
+  }
+
+  /// Admin: renames the group.
+  Future<void> renameGroup(String groupId, String name) async {
+    final g = groups[groupId];
+    if (g == null || !g.isAdmin || !g.active || g.roster.closed) throw StateError('only the group admin can rename the group');
+    final n = cleanName(name, maxGroupNameBytes);
+    if (n.isEmpty || n == g.name) return;
+    await _updateRoster(g, g.roster.members.toList(), name: n);
+  }
+
+  Future<void> _updateRoster(Group g, List<GroupMember> members, {String? name, bool closed = false, List<String> alsoTo = const []}) async {
+    g.roster = await Roster.sign(
+      g.signKey!,
+      groupId: g.roster.groupId,
+      version: g.roster.version + 1,
+      name: name ?? g.roster.name,
+      members: members,
+      closed: closed,
+    );
+    _changed();
+    final payload = g.roster.encode();
+    final to = {for (final m in g.roster.members) m.id, ...alsoTo}..remove(_myId);
+    for (final id in to) {
+      final c = contacts[id];
+      if (c != null) await _enqueue(c, ChatMsg(MsgType.groupRoster, randomBytes(16), payload: payload));
+    }
+  }
+
+  /// Forgets a group we are no longer in (leave it first).
+  void deleteGroup(String groupId) {
+    final g = groups[groupId];
+    if (g == null || g.state == GroupState.member || g.state == GroupState.joining) return;
+    groups.remove(groupId);
+    outbox.removeWhere((o) => o.groupMsg?.startsWith('$groupId/') ?? false);
+    _changed();
+  }
+
+  void markGroupRead(String id) {
+    final g = groups[id];
+    if (g == null || g.unread == 0) return;
+    g.unread = 0;
+    _changed();
+  }
+
+  /// Members our posts go to: everyone else, except an admin who left.
+  List<GroupMember> _recipients(Group g) => [
+    for (final m in g.roster.members)
+      if (m.id != _myId && !(g.roster.closed && bytesEqual(m.signPk, g.roster.adminSignPk))) m,
+  ];
+
+  Group _activeGroup(String id) {
+    final g = groups[id];
+    if (g == null || !g.active || g.signKey == null) throw StateError('not a member of this group');
+    return g;
+  }
+
+  Future<Message> sendGroupText(String groupId, String text, {String? replyTo}) async {
+    final g = _activeGroup(groupId);
+    if (utf8.encode(text).length > maxTextBytes) throw ArgumentError('message too long');
+    final m = Message(
+      id: hex(randomBytes(16)),
+      outgoing: true,
+      text: text,
+      time: DateTime.now(),
+      replyTo: _replyIn(g.messages, replyTo),
+      author: _myId,
+    );
+    g.messages.add(m);
+    _changed();
+    await _sendPost(g, _chatFor(m), m.id);
+    return m;
+  }
+
+  Future<Message> sendGroupImage(
+    String groupId,
+    Uint8List webp, {
+    required int width,
+    required int height,
+    String caption = '',
+    String? replyTo,
+  }) async {
+    final g = _activeGroup(groupId);
+    if (utf8.encode(caption).length > maxTextBytes ~/ 2) throw ArgumentError('caption too long');
+    final ref = _checkedRef(webp, MediaKind.image, width, height);
+    await _store(ref.id, webp);
+    final m = Message(
+      id: hex(randomBytes(16)),
+      outgoing: true,
+      text: caption,
+      time: DateTime.now(),
+      media: ref,
+      replyTo: _replyIn(g.messages, replyTo),
+      author: _myId,
+    );
+    g.messages.add(m);
+    _changed();
+    final to = await _sendPost(g, _chatFor(m), m.id);
+    for (final c in to) {
+      _rememberSent(c, ref.id);
+      await _pushMedia(c, ref.id);
     }
     return m;
+  }
+
+  Future<Message> sendGroupSticker(String groupId, MediaRef ref, {String? replyTo}) async {
+    final g = _activeGroup(groupId);
+    if (ref.kind != MediaKind.sticker || !await hasMedia(ref.id)) throw ArgumentError('unknown sticker');
+    final m = Message(
+      id: hex(randomBytes(16)),
+      outgoing: true,
+      text: '',
+      time: DateTime.now(),
+      media: ref,
+      replyTo: _replyIn(g.messages, replyTo),
+      author: _myId,
+    );
+    g.messages.add(m);
+    _changed();
+    final to = await _sendPost(g, _chatFor(m), m.id);
+    for (final c in to) {
+      final known = _stickerKnownBy(c, ref.id);
+      _rememberSent(c, ref.id);
+      if (!known) await _pushMedia(c, ref.id);
+    }
+    return m;
+  }
+
+  Future<void> reactInGroup(String groupId, String messageId, String emoji) async {
+    final g = _activeGroup(groupId);
+    if (!ChatMsg.validReaction(emoji)) throw ArgumentError('not a reaction');
+    final msg = g.messages.where((m) => m.id == messageId).firstOrNull;
+    if (msg == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    msg.react(Message.me, emoji, now);
+    _changed();
+    await _sendPost(g, ChatMsg(MsgType.reaction, randomBytes(16), timestamp: now, target: unhex(messageId), text: emoji), null);
+  }
+
+  /// "groupId/messageId" to the message.
+  Message? _groupMessage(String? key) {
+    if (key == null) return null;
+    final i = key.indexOf('/');
+    final g = groups[key.substring(0, i)];
+    final id = key.substring(i + 1);
+    return g?.messages.where((m) => m.id == id).firstOrNull;
+  }
+
+  /// Signs [body] and sends it to every member we are paired with ([only]:
+  /// just those). Returns the contacts it went to.
+  Future<List<Contact>> _sendPost(Group g, ChatMsg body, String? msgId, {Set<String>? only}) async {
+    final targets = [
+      for (final m in _recipients(g))
+        if (contacts[m.id] != null && (only == null || only.contains(m.id))) contacts[m.id]!,
+    ];
+    final post = await GroupPost.sign(g.signKey!, g.roster.groupId, body.encode(), [for (final c in targets) c.idPub]);
+    g.markSeen(hex(body.id));
+    final payload = post.encode();
+    for (final c in targets) {
+      await _enqueue(
+        c,
+        ChatMsg(MsgType.groupPost, randomBytes(16), payload: payload),
+        groupMsg: msgId == null ? null : '${g.id}/$msgId',
+      );
+    }
+    return targets;
+  }
+
+  Future<void> _onGroupInvite(Contact c, Uint8List payload) async {
+    final Roster r;
+    try {
+      r = await Roster.decode(payload);
+    } on FormatException catch (e) {
+      log('bad group invite from ${c.name}: ${e.message}');
+      return;
+    }
+    // Only the admin invites, to a group that still takes members.
+    if (r.admin!.id != c.id || r.closed) return;
+    final old = groups[r.id];
+    if (old != null) {
+      if (old.state == GroupState.member || old.state == GroupState.joining) return;
+      if (!bytesEqual(old.roster.adminSignPk, r.adminSignPk)) return;
+      if (old.state == GroupState.invited && r.version <= old.roster.version) return;
+    }
+    final g = Group(
+      id: r.id,
+      roster: r,
+      state: GroupState.invited,
+      invitedBy: c.id,
+      private: c.private,
+      messages: old?.messages,
+      seenPosts: old?.seenPosts,
+    );
+    groups[g.id] = g;
+    log('${c.name} invited us to group "${r.name}"');
+    _changed();
+    onIncomingGroup?.call(g, null);
+  }
+
+  Future<void> _onGroupJoin(Contact c, Uint8List payload) async {
+    final GroupJoin j;
+    try {
+      j = GroupJoin.decode(payload);
+    } on FormatException {
+      return;
+    }
+    final g = groups[hex(j.groupId)];
+    if (g == null || !g.isAdmin || !g.active || g.roster.closed) return;
+    // Only someone we invited, once, with a key nobody else uses.
+    if (!g.pendingInvites.remove(c.id)) return;
+    if (g.roster.member(c.id) != null || g.roster.bySignPk(j.signPk) != null) return;
+    if (g.roster.members.length >= maxGroupMembers) return;
+    final name = cleanName(j.name, maxMemberNameBytes);
+    log('${c.name} joined group "${g.name}"');
+    await _updateRoster(g, [
+      ...g.roster.members,
+      GroupMember(c.idPub, j.signPk, name.isEmpty ? 'Member ${c.id.substring(0, 4)}' : name),
+    ]);
+  }
+
+  Future<void> _onGroupLeave(Contact c, Uint8List payload) async {
+    if (payload.length != 16) return;
+    final g = groups[hex(payload)];
+    if (g == null || !g.isAdmin || !g.active) return;
+    if (g.pendingInvites.remove(c.id)) _changed();
+    if (g.roster.member(c.id) == null || g.roster.closed) return;
+    log('${c.name} left group "${g.name}"');
+    await _updateRoster(g, g.roster.members.where((m) => m.id != c.id).toList());
+  }
+
+  Future<void> _onGroupRoster(Contact c, Uint8List payload) async {
+    final Roster r;
+    try {
+      r = await Roster.decode(payload);
+    } on FormatException {
+      return;
+    }
+    final g = groups[r.id];
+    // Only from the admin who made the group, and only newer lists.
+    if (g == null || !bytesEqual(r.adminSignPk, g.roster.adminSignPk) || r.admin!.id != c.id) return;
+    if (r.version <= g.roster.version) return;
+    g.roster = r;
+    final me = r.member(_myId);
+    final mine = me != null && g.signKey != null && bytesEqual(me.signPk, g.signKey!.pub);
+    if (g.state == GroupState.joining && mine) {
+      g.state = GroupState.member;
+      log('joined group "${r.name}"');
+    } else if (g.state == GroupState.member && !mine) {
+      g.state = GroupState.removed;
+      log('removed from group "${r.name}"');
+    }
+    _changed();
+  }
+
+  Future<void> _onGroupPost(Contact c, Uint8List payload) async {
+    final GroupPost p;
+    final ChatMsg body;
+    try {
+      p = GroupPost.decode(payload);
+      body = ChatMsg.decode(p.body);
+    } on FormatException {
+      return;
+    }
+    final g = groups[hex(p.groupId)];
+    if (g == null || !g.active) return;
+    if (!const {MsgType.text, MsgType.image, MsgType.sticker, MsgType.reaction}.contains(body.type)) return;
+    final postId = hex(body.id);
+    if (g.seenPosts.contains(postId)) return;
+    // Signed by a member, delivered by a member: someone removed can neither
+    // post nor pass posts on.
+    final author = g.roster.bySignPk(p.authorSignPk);
+    if (author == null || g.roster.member(c.id) == null) return;
+    if (!await p.verify()) {
+      log('group post with a bad signature from ${c.name}');
+      return;
+    }
+    g.markSeen(postId);
+    if (author.id != _myId) _applyPost(g, c, author, body);
+    _changed();
+    await _forwardPost(g, c, author, p, body.media, payload);
+  }
+
+  void _applyPost(Group g, Contact via, GroupMember author, ChatMsg body) {
+    if (body.type == MsgType.reaction) {
+      final msg = g.messages.where((x) => x.id == hex(body.target!)).firstOrNull;
+      msg?.react(author.id, body.text, body.timestamp);
+      return;
+    }
+    final id = hex(body.id);
+    if (g.messages.any((x) => x.id == id)) return;
+    final msg = Message(
+      id: id,
+      outgoing: false,
+      text: body.text,
+      time: DateTime.now(),
+      sentAt: DateTime.fromMillisecondsSinceEpoch(body.timestamp),
+      status: MsgStatus.delivered,
+      media: body.media,
+      replyTo: body.replyTo == null ? null : hex(body.replyTo!),
+      author: author.id,
+      via: via.id,
+    );
+    g.messages.add(msg);
+    g.unread++;
+    onIncomingGroup?.call(g, msg);
+    final ref = body.media;
+    if (ref != null) _detach(() => _expectMedia(via, ref));
+  }
+
+  /// Passes a new post on to the members we are paired with who may not
+  /// have it (not the author, not who brought it, not those the author sent
+  /// it to). Media follow as soon as we have the bytes.
+  Future<void> _forwardPost(Group g, Contact from, GroupMember author, GroupPost p, MediaRef? ref, Uint8List payload) async {
+    for (final m in _recipients(g)) {
+      if (m.id == author.id || m.id == from.id || p.sentDirectlyTo(m.idPub)) continue;
+      final c = contacts[m.id];
+      if (c == null) continue;
+      await _enqueue(c, ChatMsg(MsgType.groupPost, randomBytes(16), payload: payload));
+      if (ref == null) continue;
+      final known = ref.kind == MediaKind.sticker && _stickerKnownBy(c, ref.id);
+      _rememberSent(c, ref.id);
+      if (known) continue;
+      if (await hasMedia(ref.id)) {
+        await _pushMedia(c, ref.id);
+      } else {
+        _forwardPending.putIfAbsent(ref.id, () => {}).add(c.id);
+      }
+    }
+  }
+
+  // --- Session reset (restore from backup) ------------------------------
+
+  /// Starts a new session with every contact. A backup holds no ratchet
+  /// state (it never contains message keys), and a ratchet must never be
+  /// used twice, so a restored device always starts afresh. The epoch is
+  /// raised past anything used before; friends reset when they see it.
+  Future<void> restartSessions() async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    for (final c in contacts.values.toList()) {
+      await _resetSession(c, max(c.epoch + 1, now), mine: true);
+    }
+  }
+
+  void _supersede(Contact c) {
+    if (superseded) return;
+    superseded = true;
+    log('${c.name} has a newer session with this identity on another device: this device stops');
+    _changed();
+    onSuperseded?.call();
+    _detach(() => stop(handoff: false));
+  }
+
+  Future<void> _resetSession(Contact c, int epoch, {bool mine = false}) async {
+    c.epoch = epoch;
+    c.epochMine = mine;
+    c.peerResetAt = mine ? null : DateTime.now();
+    c.ratchet = null;
+    c.peerConfirmed = false;
+    c.kemCt = null;
+    c.lastHelloSent = null;
+    if (c.keys.initiator) {
+      final kem = await Crypto.kemGenerate();
+      c.kemPk = kem.pk;
+      c.kemSk = kem.sk;
+    } else {
+      c.kemPk = null;
+      c.kemSk = null;
+    }
+    // Anything sealed for the old session is useless now; what was not
+    // delivered goes again, sealed for the new one.
+    outbox.removeWhere((o) => o.contactId == c.id && o.pending == null);
+    await _requeueUndelivered(c);
+    log('new session with ${c.name}');
+    _changed();
+  }
+
+  Future<void> _requeueUndelivered(Contact c) async {
+    final cutoff = DateTime.now().subtract(relayTtl);
+    final queued = {for (final o in outbox) if (o.contactId == c.id) o.id};
+    for (final m in c.messages) {
+      if (!m.outgoing || m.status == MsgStatus.delivered || m.time.isBefore(cutoff) || queued.contains(m.id)) continue;
+      outbox.add(OutItem(id: m.id, contactId: c.id, pending: _chatFor(m).encode()));
+    }
+    final pendingGroup = {for (final o in outbox) if (o.contactId == c.id && o.groupMsg != null) o.groupMsg};
+    for (final g in groups.values) {
+      if (!g.active || g.signKey == null || !_recipients(g).any((m) => m.id == c.id)) continue;
+      for (final m in g.messages) {
+        if (!m.outgoing || m.status == MsgStatus.delivered || m.time.isBefore(cutoff)) continue;
+        if (pendingGroup.contains('${g.id}/${m.id}')) continue;
+        await _sendPost(g, _chatFor(m), m.id, only: {c.id});
+      }
+    }
   }
 
   /// Chunks are sealed in order, then sent [_parallelChunks] at a time: one
@@ -1289,6 +1961,11 @@ class Messenger {
     await _store(ref.id, bytes);
     log('${ref.kind.name} ${ref.id.substring(0, 8)} received (${bytes.length} bytes)');
     _changed();
+    // Group members we passed the post on to get the bytes now.
+    for (final id in _forwardPending.remove(ref.id) ?? const <String>{}) {
+      final c = contacts[id];
+      if (c != null) _detach(() => _pushMedia(c, ref.id));
+    }
     return true;
   }
 
@@ -1332,24 +2009,29 @@ class Messenger {
   Future<void> _mediaMaintenance(DateTime now) async {
     _transfers.removeWhere((_, t) =>
         now.difference(t.lastActivity) > (t.ref == null ? const Duration(minutes: 5) : const Duration(hours: 6)));
-    for (final c in contacts.values) {
-      if (!c.ready) continue;
-      final recent = c.messages.length > 200 ? c.messages.sublist(c.messages.length - 200) : c.messages;
-      final wanted = [
-        for (final msg in recent)
-          if (!msg.outgoing && msg.media != null) msg.media!,
-        if (c.shownAvatar != null) c.shownAvatar!,
-      ];
-      for (final ref in wanted) {
-        if (await hasMedia(ref.id)) continue;
-        final t = _transfers.putIfAbsent(ref.id, () => _Transfer(c.id, ref.chunks)..ref = ref);
-        if (t.contactId != c.id || t.requests >= 12) continue;
-        final idle = now.difference(t.lastActivity);
-        final backoff = Duration(seconds: 15 * (1 << min(t.requests, 6)));
-        final lr = t.lastRequest;
-        if (idle > const Duration(seconds: 15) && (lr == null || now.difference(lr) > backoff)) {
-          await _requestMedia(c, t);
-        }
+    List<Message> recent(List<Message> l) => l.length > 200 ? l.sublist(l.length - 200) : l;
+    final wanted = <(Contact, MediaRef)>[
+      for (final c in contacts.values)
+        if (c.ready) ...[
+          for (final msg in recent(c.messages))
+            if (!msg.outgoing && msg.media != null) (c, msg.media!),
+          if (c.shownAvatar != null) (c, c.shownAvatar!),
+        ],
+      // Group media come from whoever brought the post.
+      for (final g in groups.values)
+        if (g.active)
+          for (final msg in recent(g.messages))
+            if (!msg.outgoing && msg.media != null && (contacts[msg.via]?.ready ?? false)) (contacts[msg.via]!, msg.media!),
+    ];
+    for (final (c, ref) in wanted) {
+      if (await hasMedia(ref.id)) continue;
+      final t = _transfers.putIfAbsent(ref.id, () => _Transfer(c.id, ref.chunks)..ref = ref);
+      if (t.contactId != c.id || t.requests >= 12) continue;
+      final idle = now.difference(t.lastActivity);
+      final backoff = Duration(seconds: 15 * (1 << min(t.requests, 6)));
+      final lr = t.lastRequest;
+      if (idle > const Duration(seconds: 15) && (lr == null || now.difference(lr) > backoff)) {
+        await _requestMedia(c, t);
       }
     }
   }
@@ -1397,7 +2079,7 @@ class Messenger {
   /// relay gets its own mailbox ID and its own envelope nonce.
   Future<int> _dispatch(OutItem o) async {
     final c = contacts[o.contactId];
-    if (c == null || o.inner == null) return 0;
+    if (c == null || o.inner == null || !_started) return 0;
     final now = DateTime.now();
     // In flight: the retry loop must not send it a second time meanwhile.
     o.nextTry = now.add(_retryWindow());
@@ -1448,7 +2130,7 @@ class Messenger {
     log('${o.handshake ? 'hello' : 'message'} to ${c.name}: $sent/${grants.length} copies stored'
         '${copies.isEmpty ? '' : ' (${copies.map((x) => x.relay.addr).join(', ')})'}');
     if (sent > 0) {
-      final m = c.messages.where((m) => m.id == o.id).firstOrNull;
+      final m = c.messages.where((m) => m.id == o.id).firstOrNull ?? _groupMessage(o.groupMsg);
       if (m != null && m.status == MsgStatus.queued) m.status = MsgStatus.sent;
     } else {
       log('no usable mailbox relay for ${c.name}');
@@ -1969,6 +2651,8 @@ class Messenger {
   /// came from, or null if it is not ours.
   Future<DeleteEntry?> _receive(Uint8List blob, Uint8List mailboxId, Map<String, Contact> idMap) =>
       _locked(() async {
+        // Stopped: replies still in flight are left on the relays.
+        if (!_started) return null;
         final c = idMap[hex(mailboxId)];
         if (c == null) {
           final inv = _inviteIds[hex(mailboxId)];
@@ -2008,18 +2692,34 @@ class Messenger {
             log('bad hello from ${c.name}: $e');
           }
         } else if (kind == Envelope.kindRatchet) {
+          final Uint8List plain;
           try {
-            final plain = await c.ratchet!.decrypt(content, ad: _ad(c));
-            if (!c.keys.initiator && !c.peerConfirmed) {
-              c.peerConfirmed = true;
-              c.kemCt = null;
-            }
+            plain = await c.ratchet!.decrypt(content, ad: _ad(c));
+          } catch (e) {
+            // Not for this session: a replay, garbage, or a message for the
+            // device this identity was restored on. Never delete what we
+            // cannot read: it may be someone else's to read.
+            if (_undecryptable.length > 5000) _undecryptable.clear();
+            if (_undecryptable.add(hk)) log('could not decrypt a message from ${c.name}; left on the relay');
+            return null;
+          }
+          if (!c.keys.initiator && !c.peerConfirmed) {
+            c.peerConfirmed = true;
+            c.kemCt = null;
+          }
+          try {
             final msg = ChatMsg.decode(plain);
             msgId = hex(msg.id);
             await _onChat(c, msg);
           } catch (e) {
-            // Replay caught by the ratchet counter, or garbage.
-            log('ratchet rejected a message from ${c.name}');
+            // Decrypted (the ratchet moved on), but not understood: a newer
+            // version's message type, or a bad one. Done with it; a receipt
+            // (every message starts with type and ID) stops the resending.
+            log('could not read a message from ${c.name}: $e');
+            if (msgId == null && plain.length >= 17 && plain[0] != MsgType.receipt.index + 1) {
+              msgId = hex(plain.sublist(1, 17));
+              _queueReceipt(c, plain.sublist(1, 17));
+            }
           }
         }
         seen[hk] = SeenEntry(
@@ -2048,6 +2748,7 @@ class Messenger {
           time: DateTime.now(),
           sentAt: DateTime.fromMillisecondsSinceEpoch(m.timestamp),
           status: MsgStatus.delivered,
+          replyTo: m.replyTo == null ? null : hex(m.replyTo!),
         );
         c.messages.add(msg);
         c.unread++;
@@ -2071,6 +2772,7 @@ class Messenger {
           sentAt: DateTime.fromMillisecondsSinceEpoch(m.timestamp),
           status: MsgStatus.delivered,
           media: m.media,
+          replyTo: m.replyTo == null ? null : hex(m.replyTo!),
         );
         c.messages.add(msg);
         c.unread++;
@@ -2085,6 +2787,19 @@ class Messenger {
         c.theirAvatar = m.media;
         _changed();
         if (m.media != null) _detach(() => _expectMedia(c, m.media!));
+      case MsgType.reaction:
+        final msg = c.messages.where((x) => x.id == hex(m.target!)).firstOrNull;
+        if (msg != null && msg.react(c.id, m.text, m.timestamp)) _changed();
+      case MsgType.groupInvite:
+        await _onGroupInvite(c, m.payload!);
+      case MsgType.groupJoin:
+        await _onGroupJoin(c, m.payload!);
+      case MsgType.groupLeave:
+        await _onGroupLeave(c, m.payload!);
+      case MsgType.groupRoster:
+        await _onGroupRoster(c, m.payload!);
+      case MsgType.groupPost:
+        await _onGroupPost(c, m.payload!);
     }
   }
 
@@ -2094,6 +2809,9 @@ class Messenger {
     if (msg != null) msg.status = MsgStatus.delivered;
     if (i < 0) return;
     final o = outbox.removeAt(i);
+    // A group post is delivered once every member it went to has it.
+    final gm = o.groupMsg;
+    if (gm != null && !outbox.any((x) => x.groupMsg == gm)) _groupMessage(gm)?.status = MsgStatus.delivered;
     // Ask the relays to drop the remaining copies early.
     final byRelay = <String, (RelayInfo, List<DeleteEntry>)>{};
     for (final cp in o.copies) {

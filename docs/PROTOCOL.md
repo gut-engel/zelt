@@ -47,14 +47,42 @@ Each install generates:
 
 ## Local storage (vault)
 
-A random 256-bit master key encrypts the state (ChaCha20-Poly1305). `vault.json`
-holds that master key wrapped twice:
+Three random keys protect the data (ChaCha20-Poly1305): the **state key** (the
+state and the media files), the **private key** (the private section: chats
+marked private) and an X25519 **pending key pair** (see below). `vault.json`
+holds two PIN slots of the same size, each wrapped twice:
 
 ```
-pinWrapped = nonce ‖ AEAD(Argon2id(PIN, salt, 64 MiB, 3 passes), master)
-v2 (Android): wrapped = Keystore-AES-256-GCM(pinWrapped)
-v1 (desktop): wrapped = pinWrapped
+slot       = stateKey ‖ privateKey ‖ pendingSeed            (real PIN)
+           | stateKey ‖ 0^64                                (duress PIN)
+           | random bytes of the same length                (no duress PIN)
+pinWrapped = nonce ‖ AEAD(Argon2id(PIN, salt_i, 64 MiB, 3 passes), slot)
+v2 (Android): wrapped_i = Keystore-AES-256-GCM(pinWrapped)
+v1 (desktop): wrapped_i = pinWrapped
 ```
+
+Every attempt tries both slots (two Argon2id runs, one salt each), so neither
+the file nor the time taken shows whether a duress PIN exists. The real PIN
+opens everything. The **duress PIN** opens the state without the private
+section: private chats are not loaded, not shown, not polled, and their part of
+the vault is left untouched (their messages wait on the relays, up to 7 days).
+
+- **The split.** On every save the state is split: private contacts and groups,
+  the outbox entries and dedup entries naming them, and whatever a public group
+  says about a private contact outside its member list (who passed a post on,
+  who invited us) go to `private.bin`, padded to a power of two (at least
+  64 KiB). Relays a private contact told us about stay, under the anonymous
+  `history` source. Nothing in the public state names a private chat.
+- **Hiding a chat under duress** works too: the duress session cannot read the
+  private section, so it seals what it hides to the pending public key
+  (`pending/<name>`, X25519 + HKDF + ChaCha20-Poly1305). The next real unlock
+  merges and deletes these. Changing the PIN in a duress session changes the
+  duress slot only.
+- Old vaults (one 32-byte master key) are upgraded on the first unlock: the
+  master key becomes the state key and the new keys and the second slot are
+  made. Binding a v1 vault to the hardware key happens only with the real PIN,
+  and drops the duress slot (it cannot be re-wrapped without its PIN), so a
+  duress PIN has to be set again then.
 
 The Keystore key is non-exportable and lives in StrongBox when the phone has it,
 otherwise in the TEE. A copied vault is useless on any other device, because PIN
@@ -164,8 +192,11 @@ secrecy as with QR codes.
 Sealed with the envelope keys, kind `0`:
 
 ```
-Hello = hasPk(u8) [kemPk] hasCt(u8) [kemCt] AddressInfo
+Hello = hasPk(u8) [kemPk] hasCt(u8) [kemCt] AddressInfo epoch(u64) raisedBy(u8)
 ```
+
+`epoch` and `raisedBy` were appended later; older versions stop reading before
+them.
 
 1. Each side sends `Hello{AddressInfo}` as soon as it knows a mailbox of the other.
 2. The initiator includes its ML-KEM-768 public key.
@@ -178,6 +209,28 @@ Hello = hasPk(u8) [kemPk] hasCt(u8) [kemCt] AddressInfo
    handshake.
 
 Messages typed before this completes are kept in the outbox and sealed afterwards.
+
+### New sessions (after a restore)
+
+A backup never contains ratchet state, and a ratchet must never be used twice,
+so a restored device starts a new session with every contact. It raises each
+contact's **epoch** to `max(epoch + 1, now in ms)`, drops the ratchet and runs
+the handshake above again (`raisedBy = 1`, "the sender raised it"). A contact
+that receives a hello with a higher epoch resets its side too, re-sends what
+was not delivered (rebuilt from the message history, group posts re-signed,
+identical bytes), and keeps sending hellos with `raisedBy = 2` ("you raised
+it") for 10 minutes. Hellos from a lower epoch are ignored, so a delayed or
+replayed one cannot reset anything.
+
+The old device, if it still runs, shares the mailboxes. Two rules keep it from
+doing harm:
+
+- **Nothing undecryptable is deleted.** A ratchet message that does not
+  decrypt stays on the relay (for whichever device can read it) until it
+  expires.
+- **It stops for good** when it sees a hello with a higher epoch and
+  `raisedBy = 2`: "you raised it", but it did not, so this identity was
+  restored elsewhere. It shows that, and offers to erase itself.
 
 ## Double Ratchet
 
@@ -195,11 +248,21 @@ Ratchet plaintext:
 
 ```
 type(u8) msgId(16) body
-  1 text:           timestamp(u64) text(str)
+  1 text:           timestamp(u64) text(str) [reply]
   2 receipt:        n(u8) × msgId(16)
   3 update:         AddressInfo
   4 update request: –
+  5 image:          timestamp(u64) caption(str) MediaRef [reply]
+  6 sticker:        timestamp(u64) MediaRef [reply]
+  7 media chunk, 8 media request, 9 profile picture: see "Images and stickers"
+ 10 reaction:       timestamp(u64) target(16) emoji(str, ≤ 32 bytes; empty: removed)
+ 11–15 group invite, join, roster, leave, post: payload(varbytes), see "Groups"
+reply = 0x01 msgId(16)        (appended; older versions ignore it)
 ```
+
+Types are only ever appended. A device that decrypts a message whose type it
+does not know still acknowledges its ID (every message starts with type and
+ID), so the sender stops resending it.
 
 `AddressInfo = relays[] mailboxes[] (Credential grants) relayCreds[] (Credential) known[] (≤24 RelayInfo)`.
 `known` carries the other relays the sender has reached recently, so friends' relay lists stay in sync
@@ -460,6 +523,87 @@ location, camera, ICC, text chunks); stickers are fitted into 256 px.
 derived from the vault master key, file names `HMAC(nameKey, hash)` so the disk
 does not reveal which known pictures the device holds.
 
+## Replies and reactions
+
+A reply carries the ID of the message it answers, appended to a text, image
+or sticker (an ID that is not in the chat is dropped by the sender). A
+reaction is its own message: the target's ID and one emoji (no letters or
+digits, no control characters, at most 32 bytes), or an empty string to take
+it back. Each person has at most one reaction per message; the newest by the
+reactor's clock wins, and a removed reaction is kept as an empty entry so an
+older one arriving late cannot bring it back.
+
+## Groups
+
+Groups use the pairwise ratchets; there is no group key.
+
+- **Admin and roster.** The creator is the admin and makes an Ed25519 key for
+  this group only. The member list (roster: group ID, version, name, admin key,
+  closed flag, and per member identity key, per-group signing key and the name
+  they chose) is signed by the admin key; a higher version replaces a lower
+  one, and only one that came straight from the admin is taken. At most 32
+  members, so a roster fits in one message.
+- **Joining.** The admin invites friends (sending the current roster). A friend
+  who accepts makes their own key for this group and sends it with the name the
+  others should see; the admin adds them and sends the new roster to everyone.
+  Keys are per group and per membership, so groups cannot be linked to each
+  other or to anyone's relay identity.
+- **Posts** are a text, image, sticker or reaction message, signed by the
+  author's group key over `"zelt/group/post/v1" ‖ groupID ‖ body`. The author
+  sends a post to every member it is paired with and lists them (8-byte
+  identity-key prefixes, unsigned). Every member who gets a new post (checked:
+  signed by a member, brought by a member, not seen before) passes it on to
+  the members it is paired with who are not on that list. The admin is paired
+  with everyone, so every post reaches every member, also members who are not
+  friends with each other. Someone removed can neither post nor pass posts on.
+- **Media in groups** travel like in a chat: the author pushes the bytes to
+  the members it sent the post to; whoever passes a post on also passes the
+  bytes on as soon as it has them, and serves requests for them.
+- **Leaving.** A member who leaves tells the admin, who sends a roster without
+  them. The admin leaving closes the group: the roster is marked closed, posts
+  still flow among the others, nobody can be added or removed.
+- **Delivery state.** A post shows as delivered once every member it went to
+  directly has acknowledged it.
+
+## Backups
+
+A backup is encrypted to a **backup phrase**: 12 words (BIP39 English list,
+128 random bits and a 4-bit checksum; a word may be cut after four letters).
+From it come an X25519 key pair and a name key (HKDF). The device keeps only
+the public key and the name key: it can write backups, not read them, and
+never stores the words.
+
+```
+manifest  "zelt-backup"     = "ZELTBK1\n" ephPub(32) nonce(12) AEAD(k, privLen(u32) privatePart body)
+private part                = "ZELTBP1\n" ephPub(32) nonce(12) AEAD(k', padded(compressed{state, media}))
+body                        = compressed {v, created, state, media hashes}
+picture   "zelt-media/<n>"  = nonce(12) AEAD(HMAC(nameKey, "key" ‖ hash), bytes, aad = hash)
+n                           = hex(HMAC(nameKey, "name" ‖ hash))[0:40]
+k = HKDF(X25519(eph, backupPub), salt = ephPub ‖ backupPub, "zelt/backup/manifest/v1")
+```
+
+- **Small.** The state is compressed with zstd (level 19) or bzip2, whichever
+  is smaller. It leaves out everything that is rebuilt anyway (outbox, dedup
+  table, open invites, onion-key certificates) and every session secret.
+  Pictures are stored once each, named by a keyed hash, and only uploaded if
+  missing: after the first backup, a daily one sends the manifest and new
+  pictures only. Pictures no longer referenced are deleted.
+- **Private chats** go in the separately sealed, padded private part. A
+  session opened with the duress PIN cannot read them: it puts in the private
+  part the last real session wrote (kept sealed on the device) and deletes no
+  picture.
+- **Destinations:** a WebDAV folder, an S3-compatible bucket (path-style
+  requests, Signature Version 4), an SFTP folder (the server's host key is
+  pinned when the destination is added; a different key stops the backup), or
+  one file (`zelt-backup.zbk`; on Android in Download/Zelt, replaced each time).
+  Credentials are kept in the state, so a restore can carry on backing up.
+  Only HTTPS is used for WebDAV and S3.
+- **Restore** reads the manifest with the words, checks every picture against
+  its hash, and only then creates the vault, so a wrong phrase or a broken
+  connection leaves nothing behind. The restored device then starts new
+  sessions (see above). Moving to a new phone is: back up, restore on the new
+  phone, erase the old one.
+
 ## Peers and discovery
 
 Target: 12 active peers. Friends' relay addresses come first, then manual
@@ -563,5 +707,17 @@ Cover traffic options:
 - On Android the network code runs in the app process, kept alive by a foreground
   service. If the system kills the process, relay data is lost by design, and the
   3-copy rule covers it.
+- **Groups trust their admin** to say who is in them: the admin signs the
+  roster, so it could add someone without the members agreeing. Members who are
+  only paired with the admin get nothing once the admin leaves (closed group).
+  Group members see each other's identity keys and chosen names.
+- **The duress PIN hides; it does not erase.** Someone with forensic access can
+  see that the media folder holds more files than the visible chats use, and
+  the size of the (padded) private section. A friend who is private but also in
+  a public group shows up as a member of that group. Setting a duress PIN while
+  in a duress session only pretends, for that session.
+- **A restore needs updated friends.** Friends running a version from before
+  session epochs cannot start the new session, and an old device of the same
+  identity running such a version does not stop by itself.
 - No external review yet. Do not rely on this for anything that matters until it
   has had one.

@@ -7,10 +7,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'package:zelt_core/backup_targets.dart';
+import 'package:zelt_core/groups.dart';
 import 'package:zelt_core/messenger.dart';
 import 'package:zelt_core/models.dart';
+import 'package:zelt_core/phrase.dart';
+import 'package:zelt_core/state_split.dart';
 import 'package:zelt_core/vault.dart';
 
+import 'backup_service.dart';
 import 'hardware_key.dart';
 import 'media_view.dart';
 import 'updater.dart';
@@ -24,6 +29,21 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   Phase phase = Phase.loading;
   Vault? _vault;
   Messenger? messenger;
+  BackupService? backup;
+
+  /// Just created: offer to set up a backup before anything else.
+  bool offerBackup = false;
+
+  /// Opened with the duress PIN (private chats are not loaded).
+  bool get duress => _vault?.duress ?? false;
+
+  /// A duress session's chats marked private: their pending addition to the
+  /// private section, rewritten on every save.
+  String? _duressPending;
+
+  /// A duress session pretends a duress PIN can be set (it cannot touch the
+  /// real slot): what it was told, for this session only.
+  bool _fakeDuressSet = false;
   late Directory _dir;
   StreamSubscription<void>? _sub;
   Timer? _statusTimer;
@@ -57,6 +77,20 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Messenger get m => messenger!;
+
+  /// Tests: a messenger without a vault, wired to the widgets like a real one.
+  @visibleForTesting
+  void useMessenger(Messenger msgr) {
+    messenger = msgr;
+    _sub = msgr.changes.listen((_) => notifyListeners());
+  }
+
+  /// Tests: the app's data folder, without the platform's.
+  @visibleForTesting
+  Future<void> initAt(Directory dir) async {
+    _dir = dir;
+    phase = Vault.exists(_dir) ? Phase.locked : Phase.setup;
+  }
 
   File get _prefsFile => File('${_dir.path}/ui.json');
 
@@ -153,36 +187,89 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     await _savePrefs();
   }
 
-  Future<void> setup(String name, String pin) async {
+  Future<void> setup(String name, String pin, {@visibleForTesting Settings? settings}) async {
     _vault = await Vault.create(_dir, pin, hardware: await AndroidKeystoreWrapper.open());
-    final msgr = Messenger(identity: await Identity.generate(), settings: Settings(name: name));
+    final msgr = Messenger(identity: await Identity.generate(), settings: settings ?? Settings(name: name));
+    offerBackup = true;
     await _attach(msgr);
+  }
+
+  /// Restores a backup onto this device (no vault yet): reads everything
+  /// first, so a wrong phrase or a broken connection leaves nothing behind.
+  Future<RestoredBackup> restore(
+    BackupTarget target,
+    BackupPhrase phrase,
+    String pin, {
+    void Function(int done, int total)? progress,
+  }) async {
+    final media = <String, Uint8List>{};
+    final r = await BackupRunner.read(target, phrase, writeMedia: (h, b) async => media[h] = b, progress: progress);
+    final msgr = await Messenger.restore(r.state);
+    final v = await Vault.create(_dir, pin, hardware: await AndroidKeystoreWrapper.open());
+    for (final e in media.entries) {
+      await v.writeBlob(e.key, e.value);
+    }
+    _vault = v;
+    await _attach(msgr);
+    // Backups go on with the same phrase.
+    await backup!.usePhrase(phrase);
+    return r;
   }
 
   /// Throws [WrongPin], or [LockedOut] after too many wrong PINs.
   Future<void> unlock(String pin) async {
     final v = await Vault.unlock(_dir, pin, hardware: await AndroidKeystoreWrapper.open());
-    final state = await v.load();
+    var state = await v.load();
+    if (!v.duress) {
+      // The private section, plus chats a duress session marked private.
+      final parts = await v.loadPrivate();
+      if (state != null) state = StateSplit.merge(state, parts);
+    }
     _vault = v;
+    _duressPending = null;
+    _fakeDuressSet = false;
     final msgr = state == null
         ? Messenger(identity: await Identity.generate(), settings: Settings())
         : await Messenger.load(state);
     await _attach(msgr);
   }
 
+  /// Saves the state in its two parts. A duress session cannot write the
+  /// private section: chats it marks private go into an addition sealed to
+  /// the private section, merged by the next real unlock.
+  Future<void> _save(Map<String, dynamic> full) async {
+    final v = _vault;
+    if (v == null) return;
+    final (public, private) = StateSplit.split(full);
+    await v.save(public);
+    if (!v.duress) {
+      await v.savePrivate(private);
+    } else if (_duressPending != null || (private['contacts'] as List).isNotEmpty || (private['groups'] as List).isNotEmpty) {
+      _duressPending = await v.addPrivate(private, replace: _duressPending);
+    }
+  }
+
   Future<void> _attach(Messenger msgr) async {
     messenger = msgr;
     msgr.media = VaultMediaStore(_vault!);
-    msgr.onSave = (s) => _vault!.save(s);
+    msgr.onSave = _save;
     msgr.onLogLine = (l) => debugPrint('zelt: $l');
     msgr.onIncoming = (c, msg) {
       if (openChat == c.id) return;
       _unseen++;
       _call('notify', {'count': _unseen});
     };
+    msgr.onIncomingGroup = (g, msg) {
+      if (openChat == g.id) return;
+      _unseen++;
+      _call('notify', {'count': _unseen});
+    };
     _sub = msgr.changes.listen((_) => notifyListeners());
     await msgr.save();
     await msgr.start();
+    backup = BackupService(msgr, _vault!)
+      ..addListener(notifyListeners)
+      ..start();
     phase = Phase.unlocked;
     notifyListeners();
     await _call('start', {'text': _statusText()});
@@ -202,6 +289,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   void seenChat(String id) {
     openChat = id;
     messenger?.markRead(id);
+    messenger?.markGroupRead(id);
     _unseen = 0;
     _call('clearNotifications');
   }
@@ -211,6 +299,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   /// Stops everything and forgets the keys from memory.
   Future<void> lock() async {
     _statusTimer?.cancel();
+    backup?.dispose();
+    backup = null;
+    offerBackup = false;
     await _sub?.cancel();
     await messenger?.stop();
     messenger = null;
@@ -238,9 +329,58 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
+  /// Changes the PIN this session was opened with. Throws [ArgumentError]
+  /// if it would match the other PIN.
   Future<void> changePin(String pin) async {
     await _vault!.changePin(pin);
   }
+
+  // --- Duress PIN ------------------------------------------------------
+
+  bool get duressPinSet => duress ? _fakeDuressSet : (_vault?.duressPinSet ?? false);
+
+  /// Sets the duress PIN: it opens zelt without the private chats. In a
+  /// duress session this only pretends (the real PIN's data must stay
+  /// untouched, and must not be detectable either).
+  Future<void> setDuressPin(String pin) async {
+    if (duress) {
+      _fakeDuressSet = true;
+    } else {
+      await _vault!.setDuressPin(pin);
+    }
+    notifyListeners();
+  }
+
+  Future<void> clearDuressPin() async {
+    if (duress) {
+      _fakeDuressSet = false;
+    } else {
+      await _vault!.clearDuressPin();
+    }
+    notifyListeners();
+  }
+
+  /// The backup offer after creating an identity was answered.
+  void finishBackupOffer() {
+    offerBackup = false;
+    notifyListeners();
+  }
+
+  /// Marks a chat (contact or group) private or not.
+  void setPrivate(String id, bool private) {
+    final m = messenger;
+    if (m == null) return;
+    if (m.contacts.containsKey(id)) {
+      m.setContactPrivate(id, private);
+    } else {
+      m.setGroupPrivate(id, private);
+    }
+  }
+
+  bool isPrivate(String id) =>
+      messenger?.contacts[id]?.private ?? messenger?.groups[id]?.private ?? false;
+
+  Group? group(String id) => messenger?.groups[id];
 
   Future<void> wipe() async {
     await lock();

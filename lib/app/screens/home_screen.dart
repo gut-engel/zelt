@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import 'package:zelt_core/groups.dart';
 import 'package:zelt_core/models.dart';
 import '../app_state.dart';
 import 'chat_screen.dart';
+import 'group_screens.dart';
 import 'invite_screen.dart';
 import 'network_screen.dart';
 import 'pair_screen.dart';
@@ -17,12 +19,13 @@ class HomeScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final app = context.watch<AppState>();
     final m = app.m;
-    final contacts = m.contacts.values.toList()
-      ..sort((a, b) {
-        final ta = a.lastMessage?.time ?? DateTime(2000);
-        final tb = b.lastMessage?.time ?? DateTime(2000);
-        return tb.compareTo(ta);
-      });
+    // Chats and groups together, invitations first, then by last message.
+    DateTime last(Object x) => switch (x) {
+      Contact c => c.lastMessage?.time ?? DateTime(2000),
+      Group g => g.state == GroupState.invited ? DateTime(9999) : (g.lastMessage?.time ?? DateTime(2000)),
+      _ => DateTime(2000),
+    };
+    final contacts = <Object>[...m.contacts.values, ...m.groups.values]..sort((a, b) => last(b).compareTo(last(a)));
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
@@ -50,14 +53,18 @@ class HomeScreen extends StatelessWidget {
                   : ListView.separated(
                       itemCount: contacts.length,
                       separatorBuilder: (_, _) => const Divider(height: 1, indent: 72),
-                      itemBuilder: (context, i) => _ContactTile(contacts[i]),
+                      itemBuilder: (context, i) => switch (contacts[i]) {
+                        Contact c => _ContactTile(c),
+                        Group g => _GroupTile(g),
+                        _ => const SizedBox.shrink(),
+                      },
                     ),
             ),
           ],
         ),
         floatingActionButton: FloatingActionButton.extended(
-          icon: const Icon(Icons.qr_code_2),
-          label: const Text('Add friend'),
+          icon: const Icon(Icons.add_comment_outlined),
+          label: const Text('New chat'),
           onPressed: () => _addFriend(context),
         ),
       ),
@@ -87,6 +94,10 @@ class _ContactTile extends StatelessWidget {
             const SizedBox(width: 4),
             Icon(Icons.verified, size: 16, color: t.colorScheme.primary),
           ],
+          if (c.private) ...[
+            const SizedBox(width: 4),
+            Icon(Icons.lock_outline, size: 16, color: t.colorScheme.primary),
+          ],
         ],
       ),
       subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
@@ -96,6 +107,49 @@ class _ContactTile extends StatelessWidget {
           ? Text(shortTime(last.time), style: t.textTheme.bodySmall)
           : null,
       onTap: () => push(context, ChatScreen(contactId: c.id)),
+    );
+  }
+}
+
+class _GroupTile extends StatelessWidget {
+  final Group g;
+  const _GroupTile(this.g);
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context);
+    final app = context.read<AppState>();
+    final last = g.lastMessage;
+    String who(Message msg) {
+      if (msg.outgoing) return 'You';
+      return app.m.contacts[msg.author]?.name ?? g.roster.member(msg.author ?? '')?.name ?? 'Someone';
+    }
+
+    final subtitle = g.state == GroupState.invited
+        ? '${app.m.contacts[g.invitedBy]?.name ?? 'A friend'} invited you'
+        : last == null
+        ? groupStatus(g)
+        : '${who(last)}: ${snippet(last)}';
+    return ListTile(
+      leading: GroupAvatar(g.name),
+      title: Row(
+        children: [
+          Flexible(child: Text(g.name, overflow: TextOverflow.ellipsis)),
+          if (g.private) ...[
+            const SizedBox(width: 4),
+            Icon(Icons.lock_outline, size: 16, color: t.colorScheme.primary),
+          ],
+        ],
+      ),
+      subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
+      trailing: g.state == GroupState.invited
+          ? Badge(label: const Text('new'), backgroundColor: t.colorScheme.tertiary)
+          : g.unread > 0
+          ? Badge(label: Text('${g.unread}'))
+          : last != null
+          ? Text(shortTime(last.time), style: t.textTheme.bodySmall)
+          : null,
+      onTap: () => push(context, ChatScreen.group(groupId: g.id)),
     );
   }
 }
@@ -117,7 +171,7 @@ class _Empty extends StatelessWidget {
             Text('No friends yet', style: t.textTheme.titleLarge),
             const SizedBox(height: 8),
             const Text(
-              'zelt has no directory. Tap "Add friend": scan each other\'s QR codes '
+              'zelt has no directory. Tap "New chat": scan each other\'s QR codes '
               'in person, or send a one-time invite text. Each friend also becomes '
               'part of your network.',
               textAlign: TextAlign.center,
@@ -150,6 +204,14 @@ Future<void> _addFriend(BuildContext context) async {
             title: const Text('With an invite text'),
             subtitle: const Text('Send a one-time text, valid for 15 minutes, or paste one you got.'),
             onTap: () => Navigator.pop(ctx, const InviteScreen()),
+          ),
+          const Divider(),
+          ListTile(
+            key: const Key('newGroup'),
+            leading: const Icon(Icons.group_add_outlined),
+            title: const Text('New group'),
+            subtitle: const Text('A chat with several friends.'),
+            onTap: () => Navigator.pop(ctx, const NewGroupScreen()),
           ),
           const SizedBox(height: 8),
         ],

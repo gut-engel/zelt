@@ -76,6 +76,12 @@ class MainActivity : FlutterActivity() {
                         call.argument<String>("mime")!!,
                         result,
                     )
+                    "writeBackup" -> writeBackup(
+                        call.argument<ByteArray>("bytes")!!,
+                        call.argument<String>("name")!!,
+                        result,
+                    )
+                    "readBackup" -> readBackup(call.argument<String>("name")!!, result)
                     "background" -> {
                         // Keep the engine (and the relay) alive instead of finishing.
                         moveTaskToBack(true)
@@ -129,6 +135,81 @@ class MainActivity : FlutterActivity() {
      * Pictures/Zelt, where the gallery shows it. Needs no permission on
      * Android 10+; older versions get it in the app's own pictures folder.
      */
+    /**
+     * The backup file in Downloads/Zelt (visible to file managers, USB and
+     * sync apps), replaced in place on every backup. Runs off the UI thread:
+     * a backup can be tens of megabytes.
+     */
+    private fun backupUri(name: String): Uri? {
+        if (Build.VERSION.SDK_INT < 29) return null
+        val projection = arrayOf(MediaStore.Downloads._ID)
+        val sel = "${MediaStore.Downloads.DISPLAY_NAME} = ? AND ${MediaStore.Downloads.RELATIVE_PATH} = ?"
+        contentResolver.query(
+            MediaStore.Downloads.EXTERNAL_CONTENT_URI, projection, sel,
+            arrayOf(name, Environment.DIRECTORY_DOWNLOADS + "/Zelt/"), null,
+        )?.use { c ->
+            if (c.moveToFirst()) {
+                return Uri.withAppendedPath(MediaStore.Downloads.EXTERNAL_CONTENT_URI, c.getLong(0).toString())
+            }
+        }
+        return null
+    }
+
+    private fun legacyBackupFile(name: String) =
+        File(File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "Zelt").apply { mkdirs() }, name)
+
+    private fun writeBackup(bytes: ByteArray, name: String, result: MethodChannel.Result) {
+        Thread {
+            try {
+                val where: String
+                if (Build.VERSION.SDK_INT >= 29) {
+                    val existing = backupUri(name)
+                    if (existing != null) {
+                        contentResolver.openOutputStream(existing, "wt").use { it!!.write(bytes) }
+                    } else {
+                        val values = ContentValues().apply {
+                            put(MediaStore.Downloads.DISPLAY_NAME, name)
+                            put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream")
+                            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Zelt")
+                            put(MediaStore.Downloads.IS_PENDING, 1)
+                        }
+                        val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                            ?: throw IllegalStateException("no Downloads folder")
+                        contentResolver.openOutputStream(uri).use { it!!.write(bytes) }
+                        values.clear()
+                        values.put(MediaStore.Downloads.IS_PENDING, 0)
+                        contentResolver.update(uri, values, null, null)
+                    }
+                    where = "Download/Zelt/$name"
+                } else {
+                    val f = legacyBackupFile(name)
+                    val tmp = File(f.path + ".part")
+                    tmp.writeBytes(bytes)
+                    if (!tmp.renameTo(f)) throw IllegalStateException("cannot write ${f.path}")
+                    where = f.path
+                }
+                runOnUiThread { result.success(where) }
+            } catch (e: Exception) {
+                runOnUiThread { result.error("backup", e.message, null) }
+            }
+        }.start()
+    }
+
+    private fun readBackup(name: String, result: MethodChannel.Result) {
+        Thread {
+            try {
+                val bytes: ByteArray? = if (Build.VERSION.SDK_INT >= 29) {
+                    backupUri(name)?.let { uri -> contentResolver.openInputStream(uri).use { it!!.readBytes() } }
+                } else {
+                    legacyBackupFile(name).takeIf { it.exists() }?.readBytes()
+                }
+                runOnUiThread { result.success(bytes) }
+            } catch (e: Exception) {
+                runOnUiThread { result.error("backup", e.message, null) }
+            }
+        }.start()
+    }
+
     private fun saveImage(bytes: ByteArray, name: String, mime: String, result: MethodChannel.Result) {
         try {
             if (Build.VERSION.SDK_INT >= 29) {

@@ -9,8 +9,15 @@ import 'package:zelt/app/screens/pair_screen.dart';
 import 'package:zelt/main.dart';
 import 'package:zelt/app/media_view.dart';
 import 'package:zelt/app/screens/settings_screen.dart';
+import 'package:zelt/app/screens/backup_screens.dart';
+import 'package:zelt/app/screens/contact_screen.dart';
+import 'package:zelt/app/backup_service.dart';
+import 'package:zelt_core/groups.dart';
+import 'package:zelt_core/vault.dart';
+import 'dart:io';
 import 'package:zelt_core/bytes.dart';
 import 'package:zelt_core/media.dart';
+import 'package:zelt_core/crypto.dart';
 import 'package:zelt_core/ratchet.dart';
 
 void main() {
@@ -34,7 +41,10 @@ void main() {
   pairQrAutoHide();
   pairLinked();
   profilePictures();
+  newFeatures();
 }
+
+final msgX = '0a' * 16, msgY = '0b' * 16;
 
 Future<AppState> unlockedWithFriend(WidgetTester tester) async {
   final app = AppState();
@@ -44,9 +54,9 @@ Future<AppState> unlockedWithFriend(WidgetTester tester) async {
     final sa = await a.newPairingSession();
     final sb = await b.newPairingSession();
     final c = await a.completePairing(sa, sb.code);
-    c.messages.add(Message(id: 'x', outgoing: false, text: 'hey there', time: DateTime.now()));
-    c.messages.add(Message(id: 'y', outgoing: true, text: 'hi!', time: DateTime.now(), status: MsgStatus.delivered));
-    app.messenger = a;
+    c.messages.add(Message(id: msgX, outgoing: false, text: 'hey there', time: DateTime.now()));
+    c.messages.add(Message(id: msgY, outgoing: true, text: 'hi!', time: DateTime.now(), status: MsgStatus.delivered));
+    app.useMessenger(a);
   });
   app.phase = Phase.unlocked;
   return app;
@@ -90,7 +100,7 @@ void pairScreen() {
     await tester.runAsync(() => app.m.node.start(relay: true));
     addTearDown(() => tester.runAsync(() => app.m.node.stop()));
     await tester.pumpWidget(ChangeNotifierProvider.value(value: app, child: const ZeltApp()));
-    await tester.tap(find.text('Add friend'));
+    await tester.tap(find.text('New chat'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('In person'));
     await tester.pumpAndSettle();
@@ -111,7 +121,7 @@ void pairScreen() {
   testWidgets('add friend offers an invite text as the second way', (tester) async {
     final app = await unlockedWithFriend(tester);
     await tester.pumpWidget(ChangeNotifierProvider.value(value: app, child: const ZeltApp()));
-    await tester.tap(find.text('Add friend'));
+    await tester.tap(find.text('New chat'));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('addByInvite')));
     await tester.pumpAndSettle();
@@ -243,5 +253,160 @@ void profilePictures() {
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
     await tester.pump(const Duration(seconds: 1));
+  });
+}
+
+void newFeatures() {
+  testWidgets('first launch offers to restore a backup', (tester) async {
+    final app = AppState()..phase = Phase.setup;
+    await tester.pumpWidget(ChangeNotifierProvider.value(value: app, child: const ZeltApp()));
+    await tester.scrollUntilVisible(find.byKey(const Key('restoreBackup')), 200, scrollable: find.byType(Scrollable).first);
+    await tester.tap(find.byKey(const Key('restoreBackup')));
+    await tester.pumpAndSettle();
+    expect(find.text('Restore from backup'), findsWidgets);
+    expect(find.byKey(const Key('restoreWords')), findsOneWidget);
+    // Words are checked while typing.
+    await tester.enterText(find.byKey(const Key('restoreWords')), 'abandon abandon xyzzy ');
+    await tester.pump();
+    expect(find.textContaining('Word 3 is not in the word list'), findsOneWidget);
+    await tester.enterText(find.byKey(const Key('restoreWords')), List.filled(12, 'abandon').join(' '));
+    await tester.pump();
+    expect(find.textContaining('do not fit together'), findsOneWidget);
+  });
+
+  testWidgets('a new identity is offered a backup, which can be skipped', (tester) async {
+    final app = await unlockedWithFriend(tester);
+    app.offerBackup = true;
+    await tester.pumpWidget(ChangeNotifierProvider.value(value: app, child: const ZeltApp()));
+    expect(find.text('Back up your chats?'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('skipBackup')));
+    await tester.pumpAndSettle();
+    expect(find.text('Robin'), findsOneWidget);
+  });
+
+  testWidgets('the phrase is shown once and three words are checked', (tester) async {
+    final app = await unlockedWithFriend(tester);
+    final dir = (await tester.runAsync(() => Directory.systemTemp.createTemp('zelt-w')))!;
+    addTearDown(() => tester.runAsync(() => dir.delete(recursive: true)));
+    final vault = (await tester.runAsync(() => Vault.create(dir, 'pin-123456')))!;
+    app.backup = BackupService(app.m, vault);
+    var done = false;
+    await tester.pumpWidget(ChangeNotifierProvider.value(
+      value: app,
+      child: MaterialApp(home: PhraseScreen(onDone: () => done = true)),
+    ));
+    final words = [for (var i = 0; i < 12; i++) (tester.widget<Text>(find.byKey(Key('word$i')))).data!];
+    await tester.tap(find.byKey(const Key('wroteItDown')));
+    await tester.pumpAndSettle();
+    int asked(int field) {
+      final label = tester.widget<TextField>(find.byKey(Key('check$field'))).decoration!.labelText!;
+      return int.parse(label.split(' ').last) - 1;
+    }
+
+    // A wrong word is refused.
+    await tester.enterText(find.byKey(const Key('check0')), words[asked(0)] == 'zoo' ? 'abandon' : 'zoo');
+    await tester.enterText(find.byKey(const Key('check1')), words[asked(1)]);
+    await tester.enterText(find.byKey(const Key('check2')), words[asked(2)]);
+    await tester.tap(find.byKey(const Key('checkWords')));
+    await tester.pump();
+    expect(find.textContaining('does not match'), findsOneWidget);
+    expect(app.backup!.configured, isFalse);
+    // The right ones (four letters are enough).
+    await tester.enterText(find.byKey(const Key('check0')), words[asked(0)].substring(0, words[asked(0)].length.clamp(3, 4)));
+    await tester.tap(find.byKey(const Key('checkWords')));
+    await tester.runAsync(() => Future.delayed(const Duration(milliseconds: 300)));
+    await tester.pumpAndSettle();
+    expect(app.backup!.configured, isTrue);
+    expect(find.byKey(const Key('addTarget')), findsOneWidget);
+    await tester.scrollUntilVisible(find.byKey(const Key('backupDone')), 200, scrollable: find.byType(Scrollable).first);
+    await tester.tap(find.byKey(const Key('backupDone')));
+    expect(done, isTrue);
+  });
+
+  testWidgets('long-press a message to react or reply', (tester) async {
+    final app = await unlockedWithFriend(tester);
+    await tester.pumpWidget(ChangeNotifierProvider.value(value: app, child: const ZeltApp()));
+    await tester.tap(find.text('Robin'));
+    await tester.pumpAndSettle();
+    await tester.longPress(find.text('hey there'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('react👍')));
+    await tester.runAsync(() => Future.delayed(const Duration(milliseconds: 200)));
+    await tester.pumpAndSettle();
+    final c = app.m.contacts.values.single;
+    expect(c.messages.firstWhere((m) => m.id == msgX).shownReactions[Message.me], '👍');
+    expect(find.text('👍'), findsOneWidget);
+
+    await tester.longPress(find.text('hey there'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('replyAction')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('replyPreview')), findsOneWidget);
+    await tester.enterText(find.byType(TextField), 'sure');
+    await tester.pump();
+    await tester.tap(find.byTooltip('Send'));
+    await tester.runAsync(() => Future.delayed(const Duration(milliseconds: 200)));
+    await tester.pumpAndSettle();
+    expect(c.messages.last.replyTo, msgX);
+    expect(find.byKey(const Key('replyPreview')), findsNothing);
+    expect(find.text('hey there'), findsNWidgets(2), reason: 'the quote shows the answered message');
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(seconds: 1));
+  });
+
+  testWidgets('a group invitation shows in the list and can be joined', (tester) async {
+    final app = await unlockedWithFriend(tester);
+    final robin = app.m.contacts.values.single;
+    final roster = (await tester.runAsync(() async {
+      final adminKey = await Crypto.ed25519Generate();
+      return Roster.sign(adminKey, groupId: randomBytes(16), version: 1, name: 'Hiking', members: [
+        GroupMember(robin.idPub, adminKey.pub, 'Robin'),
+      ]);
+    }))!;
+    app.m.groups[roster.id] = Group(id: roster.id, roster: roster, state: GroupState.invited, invitedBy: robin.id);
+    await tester.pumpWidget(ChangeNotifierProvider.value(value: app, child: const ZeltApp()));
+    expect(find.text('Hiking'), findsOneWidget);
+    expect(find.text('Robin invited you'), findsOneWidget);
+    await tester.tap(find.text('Hiking'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('joinGroup')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('joinGroup')));
+    await tester.runAsync(() => Future.delayed(const Duration(milliseconds: 300)));
+    await tester.pump();
+    expect(app.m.groups[roster.id]!.state, GroupState.joining);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(seconds: 1));
+  });
+
+  testWidgets('a chat is marked private on its contact screen', (tester) async {
+    final app = await unlockedWithFriend(tester);
+    final c = app.m.contacts.values.single;
+    await tester.pumpWidget(ChangeNotifierProvider.value(
+      value: app,
+      child: MaterialApp(home: ContactScreen(contactId: c.id)),
+    ));
+    await tester.scrollUntilVisible(find.byKey(const Key('contactPrivate')), 200);
+    await tester.tap(find.byKey(const Key('contactPrivate')));
+    await tester.pump();
+    expect(c.private, isTrue);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(seconds: 1));
+  });
+
+  testWidgets('settings show backup and the duress PIN', (tester) async {
+    final app = await unlockedWithFriend(tester);
+    await tester.pumpWidget(ChangeNotifierProvider.value(value: app, child: const MaterialApp(home: SettingsScreen())));
+    await tester.scrollUntilVisible(find.byKey(const Key('backupSettings')), 200);
+    expect(find.byKey(const Key('backupSettings')), findsOneWidget);
+    await tester.scrollUntilVisible(find.byKey(const Key('duressPin')), 200);
+    expect(find.textContaining('A second PIN'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('duressPin')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('private hidden'), findsOneWidget);
+    await tester.enterText(find.byKey(const Key('pinA')), '12');
+    await tester.enterText(find.byKey(const Key('pinB')), '12');
+    await tester.tap(find.byKey(const Key('pinSave')));
+    await tester.pump();
+    expect(find.text('Use at least 6 characters'), findsOneWidget);
   });
 }

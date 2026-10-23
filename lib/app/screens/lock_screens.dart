@@ -5,6 +5,8 @@ import 'package:provider/provider.dart';
 
 import 'package:zelt_core/vault.dart';
 import '../app_state.dart';
+import 'backup_screens.dart';
+import 'widgets.dart';
 
 class _Brand extends StatelessWidget {
   final String subtitle;
@@ -89,8 +91,8 @@ class _SetupScreenState extends State<SetupScreen> {
             ),
             const SizedBox(height: 8),
             Text(
-              'It seals your messages on this device. There is no recovery: '
-              'if you forget it, the data is gone.',
+              'It seals your messages on this device. If you forget it, only a backup '
+              '(set up next, or later in Settings) brings your chats back.',
               style: Theme.of(context).textTheme.bodySmall,
             ),
             const SizedBox(height: 24),
@@ -99,6 +101,28 @@ class _SetupScreenState extends State<SetupScreen> {
               child: _busy
                   ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2))
                   : const Text('Create identity'),
+            ),
+            const SizedBox(height: 24),
+            const Row(
+              children: [
+                Expanded(child: Divider()),
+                Padding(padding: EdgeInsets.symmetric(horizontal: 12), child: Text('or')),
+                Expanded(child: Divider()),
+              ],
+            ),
+            const SizedBox(height: 16),
+            OutlinedButton.icon(
+              key: const Key('restoreBackup'),
+              onPressed: _busy ? null : () => push(context, const RestoreScreen()),
+              icon: const Icon(Icons.settings_backup_restore),
+              label: const Text('Restore from backup'),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Moving from another phone, or after losing one: bring back your identity, friends '
+              'and chats with your 12-word backup phrase.',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodySmall,
             ),
           ],
         ),
