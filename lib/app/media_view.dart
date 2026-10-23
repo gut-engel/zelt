@@ -1,8 +1,10 @@
 import 'dart:async';
-import 'dart:typed_data';
+import 'dart:io';
 import 'dart:ui' as ui;
 
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:zelt_core/media.dart';
 import 'package:zelt_core/messenger.dart';
 import 'package:zelt_core/vault.dart';
@@ -47,6 +49,9 @@ class MediaCache {
 
   bool failed(String hash) => _failed.contains(hash);
 
+  @visibleForTesting
+  void put(String hash, MediaFrames f) => _done[hash] = f;
+
   MediaFrames? peek(String hash) {
     final f = _done.remove(hash);
     if (f != null) _done[hash] = f;
@@ -58,12 +63,17 @@ class MediaCache {
     final hit = peek(ref.id);
     if (hit != null) return Future.value(hit);
     if (_failed.contains(ref.id)) return Future.value(null);
-    return _loading[ref.id] ??= _load(m, ref).whenComplete(() => _loading.remove(ref.id));
+    // The callback must not return the removed future: whenComplete would
+    // wait for it, that is for itself, and the load would never finish.
+    return _loading[ref.id] ??= _load(m, ref).whenComplete(() {
+      _loading.remove(ref.id);
+    });
   }
 
   Future<MediaFrames?> _load(Messenger m, MediaRef ref) async {
     final bytes = await m.media.read(ref.id);
     if (bytes == null) return null;
+    final sw = Stopwatch()..start();
     try {
       final d = await decodeReceived(bytes, ref);
       final images = <ui.Image>[];
@@ -73,6 +83,7 @@ class MediaCache {
         images.add(await c.future);
       }
       final f = MediaFrames(images, d.durationsMs);
+      m.log('${ref.kind.name} ${ref.id.substring(0, 8)} decoded in ${sw.elapsedMilliseconds} ms');
       _done[ref.id] = f;
       while (_done.length > _max) {
         _done.remove(_done.keys.first)!.dispose();
@@ -100,6 +111,11 @@ class MediaView extends StatefulWidget {
 
 class _MediaViewState extends State<MediaView> {
   MediaFrames? _frames;
+
+  /// The media [_frames] were decoded from. Only frames of exactly the
+  /// widget's hash are ever shown, even if Flutter hands this state to
+  /// another message.
+  String? _framesId;
   int _i = 0;
   Timer? _anim;
   StreamSubscription<void>? _sub;
@@ -108,7 +124,23 @@ class _MediaViewState extends State<MediaView> {
   @override
   void initState() {
     super.initState();
+    _start();
+  }
+
+  @override
+  void didUpdateWidget(MediaView old) {
+    super.didUpdateWidget(old);
+    if (old.media.id == widget.media.id && identical(old.messenger, widget.messenger)) return;
+    _stop();
+    _frames = null;
+    _framesId = null;
+    _i = 0;
+    _start();
+  }
+
+  void _start() {
     _frames = MediaCache.instance.peek(widget.media.id);
+    _framesId = _frames == null ? null : widget.media.id;
     if (_frames == null) {
       // Retry whenever the messenger changes (a chunk or the last part came in).
       _sub = widget.messenger.changes.listen((_) => _try());
@@ -117,25 +149,57 @@ class _MediaViewState extends State<MediaView> {
     _animate();
   }
 
+  void _stop() {
+    _anim?.cancel();
+    _anim = null;
+    _sub?.cancel();
+    _sub = null;
+  }
+
   @override
   void dispose() {
-    _anim?.cancel();
-    _sub?.cancel();
+    _stop();
     super.dispose();
   }
 
+  /// A change came in while a load was running: look again afterwards.
+  bool _again = false;
+
+  /// Loads until the bytes are here. A change during a load is never lost:
+  /// the load that started before the bytes were stored may still come back
+  /// empty, so it runs once more (otherwise the picture waits for some later,
+  /// unrelated change).
   Future<void> _try() async {
-    if (_busy || _frames != null) return;
-    _busy = true;
-    final f = await MediaCache.instance.load(widget.messenger, widget.media);
-    _busy = false;
-    if (!mounted) return;
-    if (f != null) {
-      _sub?.cancel();
-      _frames = f;
-      _animate();
+    if (_frames != null) return;
+    if (_busy) {
+      _again = true;
+      return;
     }
-    setState(() {});
+    _busy = true;
+    try {
+      do {
+        _again = false;
+        final id = widget.media.id;
+        final f = await MediaCache.instance.load(widget.messenger, widget.media);
+        if (!mounted) return;
+        // Switched to other media meanwhile: load that one instead.
+        if (id != widget.media.id) {
+          _again = true;
+          continue;
+        }
+        if (f != null) {
+          _sub?.cancel();
+          _sub = null;
+          _frames = f;
+          _framesId = id;
+          _animate();
+          break;
+        }
+      } while (_again);
+    } finally {
+      _busy = false;
+    }
+    if (mounted) setState(() {});
   }
 
   void _animate() {
@@ -158,7 +222,7 @@ class _MediaViewState extends State<MediaView> {
   @override
   Widget build(BuildContext context) {
     final size = _size();
-    final f = _frames;
+    final f = _framesId == widget.media.id ? _frames : null;
     if (f != null) {
       return SizedBox.fromSize(
         size: size,
@@ -200,11 +264,60 @@ class MediaFullScreen extends StatelessWidget {
     final size = MediaQuery.of(context).size;
     return Scaffold(
       backgroundColor: Colors.black,
-      appBar: AppBar(backgroundColor: Colors.black, foregroundColor: Colors.white),
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            tooltip: 'Save to device',
+            icon: const Icon(Icons.download_outlined),
+            onPressed: () => saveMediaToDevice(context, messenger, media),
+          ),
+        ],
+      ),
       body: InteractiveViewer(
         maxScale: 6,
         child: Center(child: MediaView(messenger: messenger, media: media, maxWidth: size.width, maxHeight: size.height)),
       ),
     );
+  }
+}
+
+/// Saves a photo or sticker on the device (gallery on Android, a file of the
+/// user's choice on desktop). What is saved is re-encoded from pixels by
+/// [exportReceived], never the received bytes.
+Future<void> saveMediaToDevice(BuildContext context, Messenger m, MediaRef ref) async {
+  final messenger = ScaffoldMessenger.of(context);
+  void toast(String s) => messenger.showSnackBar(SnackBar(content: Text(s)));
+  final bytes = await m.media.read(ref.id);
+  if (bytes == null) {
+    toast('Not downloaded yet');
+    return;
+  }
+  try {
+    final out = await exportReceived(bytes, ref);
+    final name = 'zelt-${ref.id.substring(0, 12)}.${out.extension}';
+    if (Platform.isAndroid) {
+      final where = await const MethodChannel('zelt/service').invokeMethod<String>('saveImage', {
+        'bytes': out.bytes,
+        'name': name,
+        'mime': out.mimeType,
+      });
+      toast('Saved to ${where ?? 'the gallery'}');
+    } else {
+      final loc = await getSaveLocation(
+        suggestedName: name,
+        acceptedTypeGroups: [XTypeGroup(label: out.extension.toUpperCase(), extensions: [out.extension], mimeTypes: [out.mimeType])],
+      );
+      if (loc == null) return;
+      await File(loc.path).writeAsBytes(out.bytes, flush: true);
+      toast('Saved');
+    }
+  } on MediaRejected catch (e) {
+    toast('Cannot save this file: $e');
+  } on PlatformException catch (e) {
+    toast('Saving failed: ${e.message}');
+  } on FileSystemException catch (e) {
+    toast('Saving failed: ${e.message}');
   }
 }

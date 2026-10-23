@@ -63,7 +63,9 @@ class _ChatScreenState extends State<ChatScreen> {
     if (file == null || !mounted) return;
     setState(() => _busy = true);
     try {
+      final sw = Stopwatch()..start();
       final p = await preparePhoto(await file.readAsBytes());
+      _app.m.log('photo prepared in ${sw.elapsedMilliseconds} ms (${p.bytes.length} bytes)');
       final caption = _text.text.trim();
       if (utf8.encode(caption).length > maxTextBytes ~/ 2) throw MediaRejected('caption too long');
       _text.clear();
@@ -137,7 +139,7 @@ class _ChatScreenState extends State<ChatScreen> {
               reverse: true,
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               itemCount: msgs.length,
-              itemBuilder: (_, i) => _Bubble(msgs[i], app.m),
+              itemBuilder: (_, i) => _Bubble(msgs[i], app.m, key: ValueKey(msgs[i].id)),
             ),
           ),
           if (!c.ready)
@@ -202,22 +204,51 @@ class _ChatScreenState extends State<ChatScreen> {
 class _Bubble extends StatelessWidget {
   final Message m;
   final Messenger messenger;
-  const _Bubble(this.m, this.messenger);
+  const _Bubble(this.m, this.messenger, {super.key});
 
-  Future<void> _stickerMenu(BuildContext context, MediaRef ref) async {
-    if (m.outgoing || messenger.stickers.any((s) => s.id == ref.id)) return;
-    final add = await showModalBottomSheet<bool>(
+  /// Menu for a photo or sticker: save it on the device, and for a sticker
+  /// from a friend, add it to our own stickers (to send it on to others).
+  Future<void> _mediaMenu(BuildContext context, MediaRef ref) async {
+    final failed = MediaCache.instance.failed(ref.id);
+    // Never into the library: our own, ones already there, and ones that
+    // failed the safe decoder (they would only fail again for every friend).
+    final canAdd = ref.kind == MediaKind.sticker &&
+        !m.outgoing &&
+        !failed &&
+        !messenger.stickers.any((s) => s.id == ref.id);
+    final choice = await showModalBottomSheet<String>(
       context: context,
       builder: (ctx) => SafeArea(
-        child: ListTile(
-          leading: const Icon(Icons.bookmark_add_outlined),
-          title: const Text('Add to my stickers'),
-          onTap: () => Navigator.pop(ctx, true),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (canAdd)
+              ListTile(
+                leading: const Icon(Icons.bookmark_add_outlined),
+                title: const Text('Add to my stickers'),
+                onTap: () => Navigator.pop(ctx, 'add'),
+              ),
+            if (!failed)
+              ListTile(
+                leading: const Icon(Icons.download_outlined),
+                title: const Text('Save to device'),
+                onTap: () => Navigator.pop(ctx, 'save'),
+              ),
+          ],
         ),
       ),
     );
-    if (add == true && !await messenger.saveSticker(ref) && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Not downloaded yet')));
+    if (!context.mounted) return;
+    switch (choice) {
+      case 'add':
+        final ok = await messenger.saveSticker(ref);
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(ok ? 'Added to your stickers' : 'Not downloaded yet')),
+          );
+        }
+      case 'save':
+        await saveMediaToDevice(context, messenger, ref);
     }
   }
 
@@ -254,13 +285,14 @@ class _Bubble extends StatelessWidget {
       return Align(
         alignment: m.outgoing ? Alignment.centerRight : Alignment.centerLeft,
         child: GestureDetector(
-          onLongPress: () => _stickerMenu(context, media),
+          onTap: () => _mediaMenu(context, media),
+          onLongPress: () => _mediaMenu(context, media),
           child: Padding(
             padding: const EdgeInsets.symmetric(vertical: 4),
             child: Column(
               crossAxisAlignment: m.outgoing ? CrossAxisAlignment.end : CrossAxisAlignment.start,
               children: [
-                MediaView(messenger: messenger, media: media, maxWidth: 150, maxHeight: 150),
+                MediaView(key: ValueKey(media.id), messenger: messenger, media: media, maxWidth: 150, maxHeight: 150),
                 meta,
               ],
             ),
@@ -291,12 +323,13 @@ class _Bubble extends StatelessWidget {
                 Padding(
                   padding: const EdgeInsets.only(bottom: 4),
                   child: GestureDetector(
+                    onLongPress: () => _mediaMenu(context, media),
                     onTap: () => Navigator.of(context).push(MaterialPageRoute(
                       builder: (_) => MediaFullScreen(messenger: messenger, media: media),
                     )),
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(10),
-                      child: MediaView(messenger: messenger, media: media, maxWidth: width * 0.65, maxHeight: 360),
+                      child: MediaView(key: ValueKey(media.id), messenger: messenger, media: media, maxWidth: width * 0.65, maxHeight: 360),
                     ),
                   ),
                 ),
@@ -403,10 +436,11 @@ class _StickerPickerState extends State<StickerPicker> {
                   }
                   final ref = list[i - 1];
                   return InkWell(
+                    key: ValueKey(ref.id),
                     borderRadius: BorderRadius.circular(12),
                     onTap: () => Navigator.pop(context, ref),
                     onLongPress: () => _remove(ref),
-                    child: Center(child: MediaView(messenger: widget.messenger, media: ref, maxWidth: 88, maxHeight: 88)),
+                    child: Center(child: MediaView(key: ValueKey(ref.id), messenger: widget.messenger, media: ref, maxWidth: 88, maxHeight: 88)),
                   );
                 },
               ),

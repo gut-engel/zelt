@@ -416,15 +416,21 @@ mediaChunk   = hash(32) index(u16) total(u16) data    # 6900 bytes per chunk, on
 mediaRequest = hash(32) n(u16) n × index(u16)         # n = 0: all chunks
 ```
 
-- **Images** are pushed: the sender sends the image message, then its chunks.
-- **Stickers** carry only the hash. A friend who does not have it sends a
-  `mediaRequest`. The sender answers **only for hashes it sent to that friend**
-  (kept per contact), at most once per 30 s per hash and 400 chunks per hour per
-  friend, so nobody can use a device to fetch arbitrary content or to flood.
+- **Images** are pushed: the sender sends the image message, then its chunks,
+  a few in parallel.
+- **Stickers** carry only the hash, except the first time a sticker goes to a
+  friend who has not sent it to us: then its chunks follow right away, like an
+  image. A friend still missing it after 6 s sends a `mediaRequest`. The sender
+  answers **only for hashes it sent to that friend** (kept per contact), at most
+  once per 10 s per hash and 400 chunks per hour per friend, so nobody can use a
+  device to fetch arbitrary content or to flood.
 - The receiver accepts reassembled bytes only if size and SHA-256 match the
   reference. Chunks for unknown hashes are buffered only a little (4 transfers,
   2 MB per friend, 5 minutes). Incomplete media is requested again with
-  backoff, also after a restart.
+  backoff (from 15 s), also after a restart.
+- Watches are replenished while one batch of SURBs is still at the relay (it
+  keeps two watches per mailbox), so a burst of chunks drains without waiting
+  for a round trip.
 - Limits, checked before anything is fetched: images ≤ 512 KB and ≤ 2048 px,
   stickers ≤ 256 KB, ≤ 320 px and ≤ 80 frames; only WebP.
 
@@ -434,7 +440,7 @@ decoder (`package:image`) in a separate isolate that is killed after 8 s, with
 a pixel budget, after the format, dimensions and frame count were checked.
 Only raw RGBA pixels go to the renderer (`decodeImageFromPixels`). The sender
 converts its own files the same way: photos are scaled to at most 1280 px,
-oriented, and re-encoded to about 120 KB, which drops all metadata (EXIF
+oriented, and re-encoded to at most 64 KB, which drops all metadata (EXIF
 location, camera, ICC, text chunks); stickers are fitted into 256 px.
 
 **At rest** media sit in the vault: one file each, ChaCha20-Poly1305 with a key

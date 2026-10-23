@@ -1128,27 +1128,55 @@ class Messenger {
     final c = contacts[contactId];
     if (c == null) throw StateError('unknown contact');
     if (ref.kind != MediaKind.sticker || !await hasMedia(ref.id)) throw ArgumentError('unknown sticker');
+    // A friend who sent it to us, or got it from us, has it: hash only.
+    // Otherwise the bytes follow right away, saving a request round trip.
+    final known = c.sentMedia.contains(ref.id) || c.messages.any((x) => !x.outgoing && x.media?.id == ref.id);
     final id = randomBytes(16);
     final now = DateTime.now();
     final m = Message(id: hex(id), outgoing: true, text: '', time: now, media: ref);
     c.messages.add(m);
     _rememberSent(c, ref.id);
     await _enqueue(c, ChatMsg(MsgType.sticker, id, timestamp: now.millisecondsSinceEpoch, media: ref));
+    final bytes = known ? null : await media.read(ref.id);
+    if (bytes != null) {
+      // Counts as served: a request racing the push is not answered twice.
+      _lastServed['${c.id}/${ref.id}'] = now;
+      await _sendChunks(c, ref.id, bytes);
+    }
     return m;
   }
 
+  /// Chunks are sealed in order, then sent [_parallelChunks] at a time: one
+  /// slow first hop no longer holds up every chunk behind it.
   Future<void> _sendChunks(Contact c, String hash, Uint8List bytes, [List<int> indices = const []]) async {
     final total = chunkCount(bytes.length);
     final which = indices.isEmpty ? [for (var i = 0; i < total; i++) i] : indices.where((i) => i < total).toSet().toList();
+    final items = <OutItem>[];
     for (final i in which) {
       final start = i * mediaChunkSize;
       final data = Uint8List.sublistView(bytes, start, min(start + mediaChunkSize, bytes.length));
-      await _enqueue(
-        c,
-        ChatMsg(MsgType.mediaChunk, randomBytes(16), mediaHash: unhex(hash), chunkIndex: i, chunkTotal: total, chunkData: Uint8List.fromList(data)),
-      );
+      final chat = ChatMsg(MsgType.mediaChunk, randomBytes(16),
+          mediaHash: unhex(hash), chunkIndex: i, chunkTotal: total, chunkData: Uint8List.fromList(data));
+      items.add(OutItem(id: hex(chat.id), contactId: c.id, pending: chat.encode()));
     }
+    outbox.addAll(items);
+    _changed();
+    if (!c.ready) return;
+    for (final o in items) {
+      await _seal(c, o);
+    }
+    var next = 0;
+    Future<void> worker() async {
+      while (next < items.length) {
+        final o = items[next++];
+        if (outbox.contains(o)) await _dispatch(o);
+      }
+    }
+
+    await Future.wait([for (var i = 0; i < _parallelChunks; i++) worker()]);
   }
+
+  static const _parallelChunks = 4;
 
   /// An image or sticker message arrived: get its bytes unless we have them.
   Future<void> _expectMedia(Contact c, MediaRef ref) async {
@@ -1163,9 +1191,17 @@ class Messenger {
     }
     final tr = _transfers[ref.id]!;
     if (await _tryComplete(tr)) return;
-    // Stickers come by hash only: ask the sender for the bytes.
-    if (ref.kind == MediaKind.sticker && tr.parts.isEmpty) await _requestMedia(c, tr);
+    if (ref.kind != MediaKind.sticker) return;
+    // A sticker new to us usually has its bytes right behind it; ask the
+    // sender only if none arrive (older versions send the hash only).
+    _bg.createTimer(_stickerPushWait, () async {
+      if (!_started || await hasMedia(ref.id)) return;
+      final t = _transfers[ref.id];
+      if (t != null && t.contactId == c.id && t.parts.isEmpty && t.lastRequest == null) await _requestMedia(c, t);
+    });
   }
+
+  static const _stickerPushWait = Duration(seconds: 6);
 
   static int _chunkLen(MediaRef ref, int i) =>
       i < ref.chunks - 1 ? mediaChunkSize : ref.size - mediaChunkSize * (ref.chunks - 1);
@@ -1228,7 +1264,7 @@ class Messenger {
     final now = DateTime.now();
     final key = '${c.id}/$h';
     final last = _lastServed[key];
-    if (last != null && now.difference(last) < const Duration(seconds: 30)) return;
+    if (last != null && now.difference(last) < const Duration(seconds: 10)) return;
     final bytes = await media.read(h);
     if (bytes == null) return;
     final n = m.indices.isEmpty ? chunkCount(bytes.length) : m.indices.length;
@@ -1259,9 +1295,9 @@ class Messenger {
         final t = _transfers.putIfAbsent(ref.id, () => _Transfer(c.id, ref.chunks)..ref = ref);
         if (t.contactId != c.id || t.requests >= 12) continue;
         final idle = now.difference(t.lastActivity);
-        final backoff = Duration(seconds: 45 * (1 << min(t.requests, 6)));
+        final backoff = Duration(seconds: 15 * (1 << min(t.requests, 6)));
         final lr = t.lastRequest;
-        if (idle > const Duration(seconds: 45) && (lr == null || now.difference(lr) > backoff)) {
+        if (idle > const Duration(seconds: 15) && (lr == null || now.difference(lr) > backoff)) {
           await _requestMedia(c, t);
         }
       }
@@ -1313,6 +1349,8 @@ class Messenger {
     final c = contacts[o.contactId];
     if (c == null || o.inner == null) return 0;
     final now = DateTime.now();
+    // In flight: the retry loop must not send it a second time meanwhile.
+    o.nextTry = now.add(_retryWindow());
     final prev = {for (final cp in o.copies) cp.relay.id};
     final byNode = <String, Credential>{};
     for (final g in c.theirMailboxes) {
@@ -1658,6 +1696,7 @@ class Messenger {
   Timer? _rewatchSoon;
   final Set<String> _watching = {};
   final Map<String, int> _watchSurbsLeft = {};
+  static const _relayWatchesPerId = 2;
 
   Duration get _watchMean => _foreground ? timings.watch : timings.watchBackground;
 
@@ -1712,7 +1751,8 @@ class Messenger {
         if (surbs == null) return;
         if (await _sendOnion(rec.relay, WatchCmd(ttl, surbs, chunk).encode())) total += surbs.length;
       }
-      _watchSurbsLeft[k] = total;
+      // The relay keeps the newest [_relayWatchesPerId] watches per mailbox.
+      _watchSurbsLeft[k] = min((_watchSurbsLeft[k] ?? 0) + total, _relayWatchesPerId * fetchSurbs);
     } catch (e) {
       log('watch ${rec.relay.addr} failed: $e');
     } finally {
@@ -1726,8 +1766,10 @@ class Messenger {
     rec.failures = 0;
     final left = (_watchSurbsLeft[k] ?? 1) - 1;
     _watchSurbsLeft[k] = left;
-    // Replenish before the watch runs dry (jittered).
-    if (left <= 1) {
+    // Replenish while one batch of SURBs is still left (jittered): the relay
+    // holds two watches, so a burst (an image's chunks) drains through the
+    // next batch instead of waiting a round trip for it.
+    if (left <= fetchSurbs) {
       Timer(Duration(milliseconds: 200 + _rng.nextInt(1000)), () => unawaited(_watchRelay(rec)));
     }
     if (r.type != Reply.blob) return;
@@ -1983,6 +2025,7 @@ class Messenger {
         c.messages.add(msg);
         c.unread++;
         onIncoming?.call(c, msg);
+        log('${m.media!.kind.name} ${m.media!.id.substring(0, 8)} announced by ${c.name} (${m.media!.chunks} chunks)');
         _detach(() => _expectMedia(c, m.media!));
       case MsgType.mediaChunk:
         await _onChunk(c, m);

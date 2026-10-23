@@ -48,8 +48,10 @@ class MediaRejected implements Exception {
 /// Longest side of a sent photo.
 const photoMaxSide = 1280;
 
-/// Target size of a sent photo (about 18 chunks).
-const photoTargetBytes = 120 * 1024;
+/// Target size of a sent photo (at most 10 chunks): every chunk is a
+/// mixnet message, so size is what makes a photo slow. Camera photos land
+/// around 50-60 KB at quality 66-74, which still looks clean at 1280 px.
+const photoTargetBytes = 64 * 1024;
 
 /// Sticker canvas.
 const stickerSide = 256;
@@ -123,7 +125,7 @@ PreparedMedia _preparePhoto(Uint8List file) {
   var side = photoMaxSide;
   while (true) {
     final scaled = _fit(image, side);
-    for (final q in [82, 74, 66, 58, 50, 42]) {
+    for (final q in [74, 66, 58, 50, 42]) {
       final out = img.encodeWebP(scaled, lossless: false, quality: q, method: 4, exact: false);
       if (out.length <= photoTargetBytes || (q == 42 && side <= 640)) {
         if (out.length > maxImageBytes) throw MediaRejected('image does not compress enough');
@@ -231,4 +233,48 @@ DecodedMedia _decodeReceived(Uint8List bytes, int maxSide, int maxFrames) {
     durations.add(f.frameDuration <= 10 ? 100 : f.frameDuration);
   }
   return DecodedMedia(decoded.width, decoded.height, frames, durations);
+}
+
+// --- Saving received media to the device ----------------------------------
+
+/// A file to hand to the gallery or the file system.
+class ExportedMedia {
+  final Uint8List bytes;
+  final String extension;
+  final String mimeType;
+  ExportedMedia(this.bytes, this.extension, this.mimeType);
+}
+
+/// Media to save on the device, rebuilt from pixels: received bytes are
+/// decoded here like for display (same limits), then encoded afresh. The
+/// gallery and other apps decode files with native codecs, so they never get
+/// the bytes a friend (or an attacker using a friend's device) crafted, only
+/// a clean JPEG (photos), PNG (stickers) or GIF (animated stickers) made by
+/// our own encoder, without any metadata.
+Future<ExportedMedia> exportReceived(Uint8List bytes, MediaRef ref) {
+  if (bytes.length != ref.size || MediaFormat.sniff(bytes) != MediaFormat.webp) {
+    throw MediaRejected('not a valid media file');
+  }
+  final image = ref.kind == MediaKind.image;
+  return _isolated(
+    () => _export(_decodeReceived(bytes, image ? maxImageSide : maxStickerSide, image ? 1 : maxStickerFrames), image),
+    const Duration(seconds: 30),
+  );
+}
+
+ExportedMedia _export(DecodedMedia d, bool photo) {
+  img.Image frame(int i) => img.Image.fromBytes(
+    width: d.width,
+    height: d.height,
+    bytes: d.frames[i].buffer,
+    numChannels: 4,
+    order: img.ChannelOrder.rgba,
+  );
+  if (photo) return ExportedMedia(img.encodeJpg(frame(0), quality: 92), 'jpg', 'image/jpeg');
+  if (d.frames.length == 1) return ExportedMedia(img.encodePng(frame(0)), 'png', 'image/png');
+  final anim = frame(0)..frameDuration = d.durationsMs[0];
+  for (var i = 1; i < d.frames.length; i++) {
+    anim.addFrame(frame(i)..frameDuration = d.durationsMs[i]);
+  }
+  return ExportedMedia(img.encodeGif(anim), 'gif', 'image/gif');
 }

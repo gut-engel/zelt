@@ -2,11 +2,15 @@ package dev.zelt.zelt
 
 import android.Manifest
 import android.app.PendingIntent
+import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.media.MediaScannerConnection
 import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.provider.Settings
 import android.view.WindowManager
 import java.io.File
@@ -66,6 +70,12 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
                     "installApk" -> installApk(call.argument<String>("path")!!, result)
+                    "saveImage" -> saveImage(
+                        call.argument<ByteArray>("bytes")!!,
+                        call.argument<String>("name")!!,
+                        call.argument<String>("mime")!!,
+                        result,
+                    )
                     "background" -> {
                         // Keep the engine (and the relay) alive instead of finishing.
                         moveTaskToBack(true)
@@ -111,6 +121,39 @@ class MainActivity : FlutterActivity() {
             result.success(null)
         } catch (e: Exception) {
             result.error("install", e.message, null)
+        }
+    }
+
+    /**
+     * Saves an image (re-encoded by the app, never received bytes) to
+     * Pictures/Zelt, where the gallery shows it. Needs no permission on
+     * Android 10+; older versions get it in the app's own pictures folder.
+     */
+    private fun saveImage(bytes: ByteArray, name: String, mime: String, result: MethodChannel.Result) {
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, name)
+                    put(MediaStore.Images.Media.MIME_TYPE, mime)
+                    put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/Zelt")
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+                val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                    ?: throw IllegalStateException("no gallery")
+                contentResolver.openOutputStream(uri).use { it!!.write(bytes) }
+                values.clear()
+                values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                contentResolver.update(uri, values, null, null)
+                result.success("Pictures/Zelt")
+            } else {
+                val dir = File(getExternalFilesDir(Environment.DIRECTORY_PICTURES), "Zelt").apply { mkdirs() }
+                val f = File(dir, name)
+                f.writeBytes(bytes)
+                MediaScannerConnection.scanFile(this, arrayOf(f.path), arrayOf(mime), null)
+                result.success(dir.path)
+            }
+        } catch (e: Exception) {
+            result.error("save", e.message, null)
         }
     }
 

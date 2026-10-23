@@ -129,4 +129,28 @@ void main() {
       }
     }
   }, timeout: const Timeout(Duration(minutes: 3)));
+
+  test('saving received media writes a fresh file rebuilt from pixels', () async {
+    final photo0 = await preparePhoto(img.encodeJpg(photo(800, 600)));
+    final jpg = await exportReceived(photo0.bytes, refFor(photo0, MediaKind.image));
+    expect((jpg.extension, jpg.mimeType), ('jpg', 'image/jpeg'));
+    expect(MediaFormat.sniff(jpg.bytes), MediaFormat.jpeg, reason: 'not the received WebP');
+    final back = img.decodeJpg(jpg.bytes)!;
+    expect((back.width, back.height), (photo0.width, photo0.height));
+    expect(back.exif.isEmpty, isTrue);
+
+    final still = await prepareSticker(img.encodePng(photo(100, 100)));
+    final png = await exportReceived(still.bytes, refFor(still, MediaKind.sticker));
+    expect(png.extension, 'png');
+    expect(MediaFormat.sniff(png.bytes), MediaFormat.png);
+
+    final anim = await prepareSticker(img.encodeGif(animation(120, 90, 5)));
+    final gif = await exportReceived(anim.bytes, refFor(anim, MediaKind.sticker));
+    expect(gif.extension, 'gif');
+    expect(img.decodeGif(gif.bytes)!.numFrames, 5);
+
+    // Bytes that do not match their reference are not exported at all.
+    final bad = Uint8List.fromList(still.bytes)..[20] ^= 0xff;
+    expect(() => exportReceived(bad.sublist(1), refFor(still, MediaKind.sticker)), throwsA(isA<MediaRejected>()));
+  });
 }

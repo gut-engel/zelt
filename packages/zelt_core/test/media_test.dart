@@ -69,29 +69,58 @@ void main() {
     expect(served(alice), 0, reason: 'images are pushed, not requested');
   });
 
-  test('a sticker travels as a hash and is fetched once on request', () async {
+  Future<void> untilHas(Messenger m, String hash) async {
+    final deadline = DateTime.now().add(const Duration(seconds: 20));
+    while (!await m.hasMedia(hash) && DateTime.now().isBefore(deadline)) {
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+  }
+
+  int chunksTo(Messenger m, String contactId) =>
+      m.outbox.where((o) => o.contactId == contactId).length;
+
+  test('a new sticker is pushed once, then travels as its hash only', () async {
     final (alice, bob, ab, ba) = await friends();
     final png = fakeWebp(20000);
     final ref = await alice.addSticker(png, width: 256, height: 256);
     expect(alice.stickers.single.id, ref.id);
     await alice.sendSticker(ab.id, ref);
-    final deadline = DateTime.now().add(const Duration(seconds: 20));
-    while (!await bob.hasMedia(ref.id) && DateTime.now().isBefore(deadline)) {
-      await Future.delayed(const Duration(milliseconds: 100));
-    }
+    expect(chunksTo(alice, ab.id), greaterThanOrEqualTo(1 + ref.chunks), reason: 'bytes follow the first send');
+    await untilHas(bob, ref.id);
     expect(await bob.media.read(ref.id), png);
-    expect(served(alice), 1);
+    await Future.delayed(const Duration(seconds: 8));
+    expect(served(alice), 0, reason: 'pushed: no request round trip');
 
     // Known now: the second sticker message costs only its hash.
+    await until(() => alice.outbox.isEmpty, 'outbox drained');
     await alice.sendSticker(ab.id, ref);
+    expect(chunksTo(alice, ab.id), 1);
     await until(() => ba.messages.where((m) => m.media?.id == ref.id).length == 2, 'second sticker');
     await Future.delayed(const Duration(seconds: 2));
-    expect(served(alice), 1, reason: 'no second fetch');
+    expect(served(alice), 0, reason: 'no fetch');
+
+    // Bob sends it back: alice has it, so only the hash goes.
+    await until(() => bob.outbox.isEmpty, 'bob outbox drained');
+    await bob.saveSticker(ref);
+    await bob.sendSticker(ba.id, ref);
+    expect(chunksTo(bob, ba.id), 1);
+  });
+
+  test('a sticker sent as hash only (older senders) is fetched on request', () async {
+    final (alice, bob, ab, ba) = await friends();
+    final png = fakeWebp(20000);
+    final ref = await alice.addSticker(png, width: 256, height: 256);
+    ab.sentMedia.add(ref.id); // as if bob already had it: no push
+    await alice.sendSticker(ab.id, ref);
+    await untilHas(bob, ref.id);
+    expect(await bob.media.read(ref.id), png);
+    expect(served(alice), 1);
   });
 
   test('media is only served to friends it was sent to, and must match its hash', () async {
     final (alice, bob, ab, ba) = await friends();
     final ref = await alice.addSticker(fakeWebp(9000), width: 128, height: 128);
+    ab.sentMedia.add(ref.id); // hash only, no push
     await alice.sendSticker(ab.id, ref);
     ab.sentMedia.clear(); // as if never sent to bob: requests must be refused
     await until(() => ba.messages.any((m) => m.media?.id == ref.id), 'sticker message');
@@ -102,6 +131,7 @@ void main() {
     // A sender whose bytes do not match the hash: the receiver rejects them.
     final ref2 = await alice.addSticker(fakeWebp(9000), width: 128, height: 128);
     await alice.media.write(ref2.id, fakeWebp(9000)); // same size, different bytes
+    ab.sentMedia.add(ref2.id);
     await alice.sendSticker(ab.id, ref2);
     await until(() => served(alice) == 1, 'served the bad bytes');
     await until(() => bob.logLines.any((l) => l.contains('did not match its hash')), 'rejected');
