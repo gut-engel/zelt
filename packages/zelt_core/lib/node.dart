@@ -74,7 +74,12 @@ class Node {
   bool _relayEnabled = false;
   ServerSocket? _server;
 
-  final Map<String, Future<Link>> _out = {};
+  /// Outbound links (or attempts) per relay, shared by every sender. These
+  /// futures never fail: they yield the link or the error as a value, and
+  /// each caller throws it in its own zone. A failing future shared across
+  /// error zones (the app's, the messenger's background zone) would reach
+  /// the zone that made it as an uncaught error, however well callers catch.
+  final Map<String, Future<(Link?, Object?)>> _out = {};
   final Map<String, Link> _clients = {};
   final Map<String, _PendingSurb> _surbs = {};
   final Map<String, Completer<void>> _pings = {};
@@ -172,7 +177,7 @@ class Node {
     // Onion keys never outlive the process run that made them.
     keyring.wipe();
     for (final f in _out.values) {
-      f.then((l) => l.close()).ignore();
+      f.then((r) => r.$1?.close());
     }
     _out.clear();
     _entryLink?.close();
@@ -239,19 +244,19 @@ class Node {
   /// Test hook: simulates network reachability (false = cannot connect).
   bool Function(RelayInfo r)? canDial;
 
-  Future<Link> _link(RelayInfo r) {
+  Future<Link> _link(RelayInfo r) async {
     final dial = canDial;
-    if (dial != null && !dial(r)) return Future.error(SocketException('unreachable (test)'));
+    if (dial != null && !dial(r)) throw SocketException('unreachable (test)');
     final k = r.key;
     final existing = _out[k];
     if (existing != null) {
-      return existing.then((l) {
-        if (!l.isClosed) return l;
-        _out.remove(k);
-        return _link(r);
-      });
+      final (l, e) = await existing;
+      if (l == null) throw e!;
+      if (!l.isClosed) return l;
+      if (identical(_out[k], existing)) _out.remove(k);
+      return _link(r);
     }
-    final f = Link.connect(r).then((l) {
+    final f = Link.connect(r).then<(Link?, Object?)>((l) {
       l.start();
       l.frames.listen(
         (fr) => _onClientFrame(l, fr, r),
@@ -272,15 +277,16 @@ class Node {
         },
       );
       onLinkResult?.call(r, true);
-      return l;
-    });
-    _out[k] = f;
-    f.catchError((Object e) {
+      return (l, null);
+    }, onError: (Object e) {
       _out.remove(k);
       onLinkResult?.call(r, false);
-      throw e;
-    }).ignore();
-    return f;
+      return (null, e);
+    });
+    _out[k] = f;
+    final (l, e) = await f;
+    if (l == null) throw e!;
+    return l;
   }
 
   void _onServerFrame(Link link, Frame f) {
@@ -724,14 +730,15 @@ class Node {
     unawaited(keyring.maintain());
     certs.prune();
     for (final e in _out.entries.toList()) {
-      e.value.then((l) {
-        if (identical(l, _entryLink)) return;
+      e.value.then((r) {
+        final l = r.$1;
+        if (l == null || identical(l, _entryLink)) return;
         if (now.difference(l.lastActivity) > const Duration(minutes: 2)) {
           _idleClosed.add(l);
           l.close();
           _out.remove(e.key);
         }
-      }).ignore();
+      });
     }
   }
 
