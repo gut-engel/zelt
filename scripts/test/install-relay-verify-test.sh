@@ -14,7 +14,7 @@ cat > "$T/bin/docker" <<STUB
 echo "docker \$*" >> "$T/docker.log"
 case "\$1" in
   info) exit 0 ;;
-  logs) echo "  zelt-relay:203.0.113.7:47017/KEY" ;;
+  logs) echo "  zelt-relay:127.0.0.1:47017/KEY" ;;
   ps) echo 0123abcd ;;
   image) cat "$T/built" 2>/dev/null ;;
   build) for a in "\$@"; do case "\$a" in ZELT_REVISION=*) echo "\${a#ZELT_REVISION=}" > "$T/built" ;; esac; done ;;
@@ -40,7 +40,7 @@ $G tag -a v1.1.0 -m "unsigned"                                   # newest tag, u
 echo 3 > "$R/f" && $G add -A && $G commit -q -m three          # unsigned main
 
 run() { env -i HOME="$T/home" PATH="$T/bin:/usr/bin:/bin" ZELT_YES=1 ZELT_SCHEDULER=cron \
-  ZELT_REPO="file://$R" ZELT_PUBLIC_IP=203.0.113.7 ZELT_AUTO_UPDATE=0 ZELT_SIGNERS="$T/allowed_signers" "$@"; }
+  ZELT_REPO="file://$R" ZELT_PUBLIC_IP=127.0.0.1 ZELT_AUTO_UPDATE=0 ZELT_SIGNERS="$T/allowed_signers" "$@"; }
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass+1)); else echo "FAIL $1"; fail=$((fail+1)); fi; }
 
@@ -78,7 +78,7 @@ check "unsigned update is not installed" '[ "$(cat "$T/built")" = "$before" ] &&
 #    to signed releases instead of getting stuck.
 git -C "$R" tag -d v1.4.0 >/dev/null   # leave v1.3.0 as the newest (signed) tag
 rm -rf "$T/home"; mkdir -p "$T/home/.config/zelt-relay"
-printf "ZELT_PORT='47017'\nZELT_PUBLIC_IP='203.0.113.7'\nZELT_REF='main'\nZELT_REPO='file://%s'\n" "$R" > "$T/home/.config/zelt-relay/relay.env"
+printf "ZELT_PORT='47017'\nZELT_PUBLIC_IP='127.0.0.1'\nZELT_REF='main'\nZELT_REPO='file://%s'\n" "$R" > "$T/home/.config/zelt-relay/relay.env"
 out=$(env -i HOME="$T/home" PATH="$T/bin:/usr/bin:/bin" ZELT_YES=1 ZELT_SCHEDULER=cron ZELT_AUTO_UPDATE=0 ZELT_SIGNERS="$T/allowed_signers" \
   sh "$ROOT/scripts/install-relay.sh" 2>&1 || true)
 check "old 'main' setting migrates to signed releases" '[[ "$out" == *"verified signed release v1.3.0"* ]]'

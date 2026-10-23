@@ -179,7 +179,7 @@ void main() {
   });
 
   test('worst-case pairing code stays a phone-scannable QR size', () async {
-    final relay = RelayInfo(NodeAddr(InternetAddress('2001:db8::1'), 47017), randomBytes(32));
+    final relay = RelayInfo(NodeAddr(InternetAddress('::1'), 47017), randomBytes(32));
     final g = await TokenIssuer(randomBytes(32)).issue(relay, 3);
     final code = PairingCode(
       idPub: randomBytes(32),

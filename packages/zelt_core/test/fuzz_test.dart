@@ -153,7 +153,7 @@ void main() {
 
   test('message, pairing, credential and certificate decoders', () async {
     final f = Fuzzer(3);
-    final relay = RelayInfo(NodeAddr(InternetAddress('2001:db8::1'), 47017), randomBytes(32));
+    final relay = RelayInfo(NodeAddr(InternetAddress('::1'), 47017), randomBytes(32));
     final cred = await TokenIssuer(randomBytes(32)).issue(relay, 2);
     final id = await Crypto.ed25519Generate();
     final cert = await OnionKeyCert.sign(id, 1, randomBytes(32), DateTime.now(), DateTime.now().add(const Duration(hours: 1)));

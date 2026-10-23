@@ -264,7 +264,7 @@ the encrypted routing info instead of being derived by blinding.
 forward packet (every hop's slot, replay tag and output hash) and a 3-hop SURB
 with a reply. The inputs are fixed labels: onion private keys are
 `SHA-256("onion-i")`, identities `SHA-256("identity-i")`, addresses
-192.0.2.(i+1):47017, key IDs 10, 20, 30 and 40, and delays of 100·(i+1) ms. The
+127.0.0.(i+1):47017 (loopback), key IDs 10, 20, 30 and 40, and delays of 100·(i+1) ms. The
 payload is ChaCha20(`SHA-256("payload")`). The builder's randomness is the
 ChaCha20 keystream for key `SHA-256("zelt sphinx v2 test vector")` with a zero
 nonce, consumed in this order: 32 bytes per hop for the ephemeral private keys

@@ -35,7 +35,7 @@ Map<String, dynamic> build() {
   final hops = [
     for (var i = 0; i < 4; i++)
       Hop(
-        RelayInfo(NodeAddr(InternetAddress('192.0.2.${i + 1}'), 47017), label('identity-$i')),
+        RelayInfo(NodeAddr(InternetAddress('127.0.0.${i + 1}'), 47017), label('identity-$i')),
         onionKeys[i].pub,
         10 * (i + 1),
         delayMs: 100 * (i + 1),

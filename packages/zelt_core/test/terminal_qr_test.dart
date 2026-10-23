@@ -4,7 +4,7 @@ import 'package:zelt_core/terminal_qr.dart';
 
 void main() {
   test('terminal QR: half blocks reproduce the exact module matrix', () {
-    const data = 'zelt-relay:203.0.113.7:47017/cb_AyisVUfjpAv9TDC10mMcstEyD5VT1aSGaU7D4Hps';
+    const data = 'zelt-relay:127.0.0.1:47017/cb_AyisVUfjpAv9TDC10mMcstEyD5VT1aSGaU7D4Hps';
     final img = QrImage(QrCode.fromData(data: data, errorCorrectLevel: QrErrorCorrectLevel.L));
     final n = img.moduleCount;
     final lines = (terminalQr(data, ansi: false).split('\n')..removeLast());
