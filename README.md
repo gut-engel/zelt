@@ -151,7 +151,7 @@ services:
   zelt-relay:
     build:
       # A pinned release. Update: change the tag, run the same command again.
-      context: https://github.com/gut-engel/zelt.git#v1.0.5
+      context: https://github.com/gut-engel/zelt.git#v1.0.6
       dockerfile: relay/Dockerfile
     image: zelt-relay
     container_name: zelt-relay
