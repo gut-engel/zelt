@@ -2,7 +2,7 @@
 #
 #   docker build -t zelt-relay -f relay/Dockerfile .
 #   docker run -d --name zelt-relay --network host -v zelt-relay-data:/data \
-#     -e ZELT_PUBLIC_IP=203.0.113.7 zelt-relay
+#     -e ZELT_PUBLIC_IP=<your public IP> zelt-relay
 #
 # Configuration (environment):
 #   ZELT_PORT=47017            listen port

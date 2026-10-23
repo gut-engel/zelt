@@ -1,6 +1,6 @@
 // Checks that a zelt relay is reachable and holds the key in its share string.
 //
-//   dart run bin/zelt_check.dart zelt-relay:203.0.113.7:47017/KEY [...]
+//   dart run bin/zelt_check.dart zelt-relay:IP:PORT/KEY [...]
 //
 // For each relay: TCP connect, encrypted link handshake (only the holder of
 // the node key can complete it), and a ping round trip. Exit code 0 when all

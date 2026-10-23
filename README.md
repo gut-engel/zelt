@@ -136,13 +136,14 @@ again. Friends' apps pass it on automatically.
 
 ### Without the installer: Docker Compose
 
-Save this as `docker-compose.yml` in an empty directory, put your server's
-public address in `ZELT_PUBLIC_IP`, and run `docker compose up -d --build`.
+Save this as `docker-compose.yml` in an empty directory. Next to it, create a
+`.env` file with the line `ZELT_PUBLIC_IP=<your public IP>` (comma-separated
+if there are several). Then run `docker compose up -d --build`.
 Docker fetches the pinned release from GitHub and builds it; nothing else needs
 to be downloaded.
 
 ```yaml
-# zelt relay. Edit ZELT_PUBLIC_IP, then: docker compose up -d --build
+# zelt relay. Set ZELT_PUBLIC_IP in .env, then: docker compose up -d --build
 services:
   zelt-relay:
     build:
@@ -162,8 +163,9 @@ services:
       options: { max-size: "1m", max-file: "3" }
     environment:
       ZELT_PORT: "47017"
-      # Your public IPv4 and/or IPv6 address, comma-separated.
-      ZELT_PUBLIC_IP: "203.0.113.7"
+      # Your server's public IPv4 and/or IPv6 address(es), comma-separated,
+      # from the .env file next to this one. Compose refuses to start without it.
+      ZELT_PUBLIC_IP: "${ZELT_PUBLIC_IP:?set ZELT_PUBLIC_IP in .env}"
       # Optional: other relays to announce this one to (zelt-relay:... strings).
       ZELT_PEERS: ""
     volumes:

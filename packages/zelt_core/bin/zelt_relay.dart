@@ -2,7 +2,7 @@
 //
 //   dart run bin/zelt_relay.dart [--port 47017] [--state relay.json]
 //                                [--peer zelt-relay:IP:PORT/KEY ...]
-//                                [--public-ip 203.0.113.7[,2001:db8::1]] (repeatable)
+//                                [--public-ip IP[,IP...]] (repeatable)
 //                                [--stats-minutes 1]
 //
 // Prints its share string; add it in the app under Settings > Network and peers > Add relay.
