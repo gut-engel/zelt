@@ -55,6 +55,15 @@ bool containsAscii(Uint8List b, String s) {
 }
 
 void main() {
+  test('a profile picture is a small, centred square without metadata', () async {
+    final p = await prepareAvatar(img.encodeJpg(photo(1600, 900), quality: 95));
+    expect((p.width, p.height), (avatarSide, avatarSide));
+    expect(p.bytes.length, lessThanOrEqualTo(avatarTargetBytes));
+    final d = await decodeReceived(p.bytes, refFor(p, MediaKind.avatar));
+    expect(d.frames, hasLength(1));
+    expect(d.width, avatarSide);
+  });
+
   test('a photo becomes a small WebP, scaled and without metadata', () async {
     final src = photo(3000, 2000);
     src.exif.gpsIfd['GPSLatitude'] = img.IfdValueRational(48, 1);

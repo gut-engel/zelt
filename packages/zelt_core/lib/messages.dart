@@ -116,7 +116,7 @@ class Hello {
   }
 }
 
-enum MsgType { text, receipt, update, updateRequest, image, sticker, mediaChunk, mediaRequest }
+enum MsgType { text, receipt, update, updateRequest, image, sticker, mediaChunk, mediaRequest, avatar }
 
 /// Most chunk indices one media request may list.
 const int maxRequestIndices = 200;
@@ -130,7 +130,7 @@ class ChatMsg {
   final List<Uint8List> receiptFor;
   final AddressInfo? info;
 
-  /// image / sticker.
+  /// image / sticker; avatar (null: the picture was removed).
   final MediaRef? media;
 
   /// mediaChunk / mediaRequest: the media hash.
@@ -196,6 +196,13 @@ class ChatMsg {
         for (final i in indices) {
           w.u16(i);
         }
+      case MsgType.avatar:
+        if (media == null) {
+          w.u8(0);
+        } else {
+          w.u8(1);
+          media!.write(w);
+        }
     }
     return w.toBytes();
   }
@@ -218,10 +225,10 @@ class ChatMsg {
       case MsgType.image:
         final ts = r.u64();
         final text = r.str();
-        return ChatMsg(type, id, timestamp: ts, text: text, media: MediaRef.read(r));
+        return ChatMsg(type, id, timestamp: ts, text: text, media: _ref(r, MediaKind.image));
       case MsgType.sticker:
         final ts = r.u64();
-        return ChatMsg(type, id, timestamp: ts, media: MediaRef.read(r));
+        return ChatMsg(type, id, timestamp: ts, media: _ref(r, MediaKind.sticker));
       case MsgType.mediaChunk:
         final h = r.bytes(32);
         final i = r.u16();
@@ -236,6 +243,15 @@ class ChatMsg {
         final n = r.u16();
         if (n > maxRequestIndices) throw const FormatException('too many indices');
         return ChatMsg(type, id, mediaHash: h, indices: [for (var i = 0; i < n; i++) r.u16()]);
+      case MsgType.avatar:
+        return ChatMsg(type, id, media: r.u8() == 0 ? null : _ref(r, MediaKind.avatar));
     }
+  }
+
+  /// Each message type carries only its own kind of media.
+  static MediaRef _ref(ByteReader r, MediaKind kind) {
+    final ref = MediaRef.read(r);
+    if (ref.kind != kind) throw const FormatException('media kind');
+    return ref;
   }
 }

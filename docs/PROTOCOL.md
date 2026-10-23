@@ -409,12 +409,16 @@ Media are content-addressed: `hash = SHA-256(bytes)`. On the wire everything is
 the source was (GIF imports become animated WebP).
 
 ```
-MediaRef = hash(32) size(u32) kind(u8: 0 image, 1 sticker) format(u8: 4 = WebP) width(u16) height(u16)
+MediaRef = hash(32) size(u32) kind(u8: 0 image, 1 sticker, 2 avatar) format(u8: 4 = WebP) width(u16) height(u16)
 image        = ts(u64) caption(str) MediaRef          # chat message
 sticker      = ts(u64) MediaRef                       # chat message, hash only
 mediaChunk   = hash(32) index(u16) total(u16) data    # 6900 bytes per chunk, one ratchet message each
 mediaRequest = hash(32) n(u16) n × index(u16)         # n = 0: all chunks
+avatar       = 0 | 1 MediaRef                         # profile picture; 0: removed
 ```
+
+Each message type only accepts its own kind of MediaRef (an image message
+cannot carry a sticker or a profile picture).
 
 - **Images** are pushed: the sender sends the image message, then its chunks,
   a few in parallel.
@@ -431,8 +435,17 @@ mediaRequest = hash(32) n(u16) n × index(u16)         # n = 0: all chunks
 - Watches are replenished while one batch of SURBs is still at the relay (it
   keeps two watches per mailbox), so a burst of chunks drains without waiting
   for a round trip.
+- **Profile pictures** go only to contacts we marked as verified (safety
+  number compared). Verifying a contact sends ours (`avatar` plus its chunks,
+  pushed); un-verifying it, changing it or removing it sends the new state
+  (`avatar` 0 when nothing is left for them), and the old hash is no longer
+  served to them. The receiver shows a contact's picture only while it has
+  that contact verified too: an unverified contact could be anyone, and a
+  familiar face would make them look trusted. The app crops to a 256 px square
+  of at most 32 KB.
 - Limits, checked before anything is fetched: images ≤ 512 KB and ≤ 2048 px,
-  stickers ≤ 256 KB, ≤ 320 px and ≤ 80 frames; only WebP.
+  stickers ≤ 256 KB, ≤ 320 px and ≤ 80 frames, profile pictures ≤ 64 KB and
+  ≤ 512 px, one frame; only WebP.
 
 **Zero-click hardening.** Received bytes never reach a native decoder (Skia,
 libwebp, the OS image stack). They are decoded by a pure-Dart, memory-safe

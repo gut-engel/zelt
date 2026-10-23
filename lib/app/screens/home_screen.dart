@@ -79,7 +79,7 @@ class _ContactTile extends StatelessWidget {
         ? 'Paired. Say hello.'
         : '${last.outgoing ? 'You: ' : ''}${last.text.replaceAll('\n', ' ')}';
     return ListTile(
-      leading: Avatar(c.name),
+      leading: Avatar(c.name, picture: c.shownAvatar),
       title: Row(
         children: [
           Flexible(child: Text(c.name, overflow: TextOverflow.ellipsis)),

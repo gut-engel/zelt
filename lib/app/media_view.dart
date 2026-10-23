@@ -103,7 +103,17 @@ class MediaView extends StatefulWidget {
   final MediaRef media;
   final double maxWidth;
   final double maxHeight;
-  const MediaView({super.key, required this.messenger, required this.media, required this.maxWidth, required this.maxHeight});
+
+  /// Shown instead of the progress box until the picture is ready.
+  final Widget? placeholder;
+  const MediaView({
+    super.key,
+    required this.messenger,
+    required this.media,
+    required this.maxWidth,
+    required this.maxHeight,
+    this.placeholder,
+  });
 
   @override
   State<MediaView> createState() => _MediaViewState();
@@ -229,6 +239,7 @@ class _MediaViewState extends State<MediaView> {
         child: RawImage(image: f.images[_i % f.images.length], fit: BoxFit.contain, filterQuality: FilterQuality.medium),
       );
     }
+    if (widget.placeholder != null) return widget.placeholder!;
     final s = Theme.of(context).colorScheme;
     final failed = MediaCache.instance.failed(widget.media.id);
     final p = widget.messenger.mediaProgress(widget.media.id);

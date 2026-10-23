@@ -16,7 +16,10 @@ import 'bytes.dart';
 /// media codec): they are decoded by a pure-Dart, memory-safe decoder in a
 /// separate isolate with size and time limits, and only raw pixels reach the
 /// renderer. That shuts out zero-click exploits of native codecs.
-enum MediaKind { image, sticker }
+///
+/// A profile picture ([MediaKind.avatar]) travels the same way, but only to
+/// contacts whose safety number we marked as matching.
+enum MediaKind { image, sticker, avatar }
 
 /// Formats. On the wire everything is WebP: lossy VP8 for photos, and for
 /// stickers lossy VP8 with alpha, animated when the source was (GIF imports
@@ -51,11 +54,13 @@ const int mediaChunkSize = 6900;
 
 const int maxImageBytes = 512 * 1024;
 const int maxStickerBytes = 256 * 1024;
+const int maxAvatarBytes = 64 * 1024;
 
 /// Largest dimensions a receiver will decode (the sender scales below these).
 const int maxImageSide = 2048;
 const int maxStickerSide = 320;
 const int maxStickerFrames = 80;
+const int maxAvatarSide = 512;
 
 /// Receiver: bytes buffered for incomplete transfers, per contact.
 const int maxBufferedPerContact = 2 * 1024 * 1024;
@@ -65,7 +70,20 @@ const int maxServedChunksPerHour = 400;
 
 int chunkCount(int size) => (size + mediaChunkSize - 1) ~/ mediaChunkSize;
 
-int maxBytesFor(MediaKind k) => k == MediaKind.image ? maxImageBytes : maxStickerBytes;
+int maxBytesFor(MediaKind k) => switch (k) {
+  MediaKind.image => maxImageBytes,
+  MediaKind.sticker => maxStickerBytes,
+  MediaKind.avatar => maxAvatarBytes,
+};
+
+int maxSideFor(MediaKind k) => switch (k) {
+  MediaKind.image => maxImageSide,
+  MediaKind.sticker => maxStickerSide,
+  MediaKind.avatar => maxAvatarSide,
+};
+
+/// Only stickers may be animated.
+int maxFramesFor(MediaKind k) => k == MediaKind.sticker ? maxStickerFrames : 1;
 
 class MediaRef {
   final Uint8List hash;
@@ -107,7 +125,7 @@ class MediaRef {
     final h = r.u16();
     if (!MediaFormat.allowed(kind, format)) throw const FormatException('media format');
     if (size == 0 || size > maxBytesFor(kind)) throw const FormatException('media size');
-    final side = kind == MediaKind.image ? maxImageSide : maxStickerSide;
+    final side = maxSideFor(kind);
     if (w == 0 || h == 0 || w > side || h > side) throw const FormatException('media dimensions');
     return MediaRef(hash: hash, size: size, kind: kind, format: format, width: w, height: h);
   }

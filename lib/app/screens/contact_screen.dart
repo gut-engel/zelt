@@ -63,7 +63,16 @@ class ContactScreen extends StatelessWidget {
       body: ListView(
         padding: const EdgeInsets.all(20),
         children: [
-          Center(child: Avatar(c.name, radius: 36)),
+          Center(child: Avatar(c.name, radius: 36, picture: c.shownAvatar)),
+          if (c.theirAvatar != null && !c.verified) ...[
+            const SizedBox(height: 8),
+            Text(
+              '${c.name} shared a profile picture. It shows once you have compared the '
+              'safety number and marked it as matching.',
+              textAlign: TextAlign.center,
+              style: t.textTheme.bodySmall,
+            ),
+          ],
           const SizedBox(height: 24),
           Text('Safety number', style: t.textTheme.titleMedium),
           const SizedBox(height: 8),
@@ -77,6 +86,7 @@ class ContactScreen extends StatelessWidget {
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
             title: const Text('Numbers match'),
+            subtitle: const Text('Also shares your profile picture with them'),
             value: c.verified,
             onChanged: (v) => m.setVerified(c.id, v),
           ),

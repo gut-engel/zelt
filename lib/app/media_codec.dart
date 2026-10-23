@@ -56,6 +56,11 @@ const photoTargetBytes = 64 * 1024;
 /// Sticker canvas.
 const stickerSide = 256;
 
+/// Profile pictures: a square of this side, at most [avatarTargetBytes]
+/// (5 chunks or fewer).
+const avatarSide = 256;
+const avatarTargetBytes = 32 * 1024;
+
 /// Largest file accepted for converting (local input).
 const maxInputBytes = 40 * 1024 * 1024;
 
@@ -105,6 +110,13 @@ Future<PreparedMedia> prepareSticker(Uint8List file) {
   return _isolated(() => _prepareSticker(file), const Duration(seconds: 90));
 }
 
+/// A local file to use as our profile picture: oriented, cropped to the
+/// centre square, scaled to [avatarSide], metadata-free WebP.
+Future<PreparedMedia> prepareAvatar(Uint8List file) {
+  if (file.length > maxInputBytes) throw MediaRejected('file too large');
+  return _isolated(() => _prepareAvatar(file), const Duration(seconds: 60));
+}
+
 img.Decoder _inputDecoder(Uint8List b, int maxPixels) => switch (MediaFormat.sniff(b)) {
   MediaFormat.jpeg => img.JpegDecoder(maxPixels: maxPixels),
   MediaFormat.png => img.PngDecoder(maxPixels: maxPixels),
@@ -134,6 +146,28 @@ PreparedMedia _preparePhoto(Uint8List file) {
     }
     side = (side * 3) ~/ 4;
   }
+}
+
+PreparedMedia _prepareAvatar(Uint8List file) {
+  final d = _inputDecoder(file, 80 * 1000 * 1000);
+  final info = d.startDecode(file);
+  if (info == null) throw MediaRejected('cannot read this image');
+  if (info.width * info.height > 80 * 1000 * 1000) throw MediaRejected('image too large');
+  var image = d.decode(file, frame: 0);
+  if (image == null) throw MediaRejected('cannot read this image');
+  if (image.numFrames > 1) image = image.frames.first;
+  image = _stripMetadata(img.bakeOrientation(image));
+  final side = image.width < image.height ? image.width : image.height;
+  final square = img.copyCrop(image, x: (image.width - side) ~/ 2, y: (image.height - side) ~/ 2, width: side, height: side);
+  final scaled = _fit(square, avatarSide);
+  for (final q in [80, 70, 60, 50, 40]) {
+    final out = img.encodeWebP(scaled, lossless: false, quality: q, method: 4, exact: false);
+    if (out.length <= avatarTargetBytes || q == 40) {
+      if (out.length > maxAvatarBytes) throw MediaRejected('image does not compress enough');
+      return PreparedMedia(out, scaled.width, scaled.height, 1);
+    }
+  }
+  throw MediaRejected('image does not compress enough');
 }
 
 PreparedMedia _prepareSticker(Uint8List file) {
@@ -207,11 +241,8 @@ Future<DecodedMedia> decodeReceived(Uint8List bytes, MediaRef ref) {
   if (bytes.length != ref.size || MediaFormat.sniff(bytes) != MediaFormat.webp) {
     throw MediaRejected('not a valid media file');
   }
-  final image = ref.kind == MediaKind.image;
-  return _isolated(
-    () => _decodeReceived(bytes, image ? maxImageSide : maxStickerSide, image ? 1 : maxStickerFrames),
-    const Duration(seconds: 8),
-  );
+  final side = maxSideFor(ref.kind), frames = maxFramesFor(ref.kind);
+  return _isolated(() => _decodeReceived(bytes, side, frames), const Duration(seconds: 8));
 }
 
 DecodedMedia _decodeReceived(Uint8List bytes, int maxSide, int maxFrames) {
@@ -255,11 +286,9 @@ Future<ExportedMedia> exportReceived(Uint8List bytes, MediaRef ref) {
   if (bytes.length != ref.size || MediaFormat.sniff(bytes) != MediaFormat.webp) {
     throw MediaRejected('not a valid media file');
   }
-  final image = ref.kind == MediaKind.image;
-  return _isolated(
-    () => _export(_decodeReceived(bytes, image ? maxImageSide : maxStickerSide, image ? 1 : maxStickerFrames), image),
-    const Duration(seconds: 30),
-  );
+  final side = maxSideFor(ref.kind), frames = maxFramesFor(ref.kind);
+  final photo = ref.kind != MediaKind.sticker;
+  return _isolated(() => _export(_decodeReceived(bytes, side, frames), photo), const Duration(seconds: 30));
 }
 
 ExportedMedia _export(DecodedMedia d, bool photo) {

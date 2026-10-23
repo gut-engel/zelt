@@ -25,6 +25,9 @@ class Settings {
   /// Pass the relays we know on to friends (keeps everyone's lists in sync).
   bool shareRelays;
 
+  /// Our profile picture; only contacts we verified get it.
+  MediaRef? avatar;
+
   Settings({
     this.hops = defaultHops,
     this.delay = DelayMode.normal,
@@ -33,6 +36,7 @@ class Settings {
     this.port = defaultPort,
     this.name = '',
     this.shareRelays = true,
+    this.avatar,
   });
 
   Map<String, dynamic> toJson() => {
@@ -43,6 +47,7 @@ class Settings {
     'port': port,
     'name': name,
     'shareRelays': shareRelays,
+    if (avatar != null) 'avatar': avatar!.toJson(),
   };
 
   factory Settings.fromJson(Map<String, dynamic> j) => Settings(
@@ -53,6 +58,7 @@ class Settings {
     port: j['port'] ?? defaultPort,
     name: j['name'] ?? '',
     shareRelays: j['shareRelays'] ?? true,
+    avatar: j['avatar'] == null ? null : MediaRef.fromJson(j['avatar']),
   );
 }
 
@@ -140,6 +146,13 @@ class Contact {
   /// to them on request.
   final List<String> sentMedia;
 
+  /// The profile picture this contact sent us. Shown only while we have
+  /// them verified ([shownAvatar]).
+  MediaRef? theirAvatar;
+
+  /// Hash of the profile picture we last sent them (null: none, or removed).
+  String? avatarSent;
+
   DateTime? lastHelloSent;
   DateTime? lastUpdateSent;
   DateTime? lastUpdateRequest;
@@ -165,6 +178,8 @@ class Contact {
     this.slot = 0,
     this.pendingJoin,
     List<String>? sentMedia,
+    this.theirAvatar,
+    this.avatarSent,
     this.lastHelloSent,
     this.lastUpdateSent,
     this.lastUpdateRequest,
@@ -177,6 +192,10 @@ class Contact {
        messages = messages ?? [];
 
   bool get ready => ratchet != null;
+
+  /// A picture from a contact whose safety number we have not checked could
+  /// be anyone's; only verified contacts show theirs.
+  MediaRef? get shownAvatar => verified ? theirAvatar : null;
 
   int tokensLeft(DateTime now) => theirMailboxes
       .where((g) => g.usable(now))
@@ -202,6 +221,8 @@ class Contact {
     'slot': slot,
     if (pendingJoin != null) 'pj': pendingJoin!.toJson(),
     if (sentMedia.isNotEmpty) 'sm': sentMedia,
+    if (theirAvatar != null) 'av': theirAvatar!.toJson(),
+    if (avatarSent != null) 'avs': avatarSent,
     if (lastHelloSent != null) 'lhs': lastHelloSent!.millisecondsSinceEpoch,
     if (lastUpdateSent != null) 'lus': lastUpdateSent!.millisecondsSinceEpoch,
     if (lastUpdateRequest != null) 'lur': lastUpdateRequest!.millisecondsSinceEpoch,
@@ -230,6 +251,8 @@ class Contact {
     slot: j['slot'] ?? 0,
     pendingJoin: j['pj'] == null ? null : PendingJoin.fromJson(j['pj']),
     sentMedia: (j['sm'] as List? ?? []).cast<String>(),
+    theirAvatar: j['av'] == null ? null : MediaRef.fromJson(j['av']),
+    avatarSent: j['avs'],
     lastHelloSent: _t(j['lhs']),
     lastUpdateSent: _t(j['lus']),
     lastUpdateRequest: _t(j['lur']),

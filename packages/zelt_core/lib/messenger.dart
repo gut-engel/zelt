@@ -715,9 +715,14 @@ class Messenger {
     _changed();
   }
 
+  /// Verifying a contact also sends them our profile picture; un-verifying
+  /// takes it back.
   void setVerified(String id, bool v) {
-    contacts[id]?.verified = v;
+    final c = contacts[id];
+    if (c == null) return;
+    c.verified = v;
     _changed();
+    _detach(() => _syncAvatar(c));
   }
 
   void markRead(String id) {
@@ -1123,6 +1128,47 @@ class Messenger {
     _changed();
   }
 
+  /// Sets our profile picture (a square WebP the app made) and sends it to
+  /// verified contacts.
+  Future<MediaRef> setAvatar(Uint8List webp, {required int width, required int height}) async {
+    final ref = _checkedRef(webp, MediaKind.avatar, width, height);
+    await _store(ref.id, webp);
+    settings.avatar = ref;
+    _changed();
+    for (final c in contacts.values.toList()) {
+      _detach(() => _syncAvatar(c));
+    }
+    return ref;
+  }
+
+  /// Removes our profile picture; contacts who had it are told to drop it.
+  void clearAvatar() {
+    settings.avatar = null;
+    _changed();
+    for (final c in contacts.values.toList()) {
+      _detach(() => _syncAvatar(c));
+    }
+  }
+
+  /// Brings a contact to the picture they should have: ours if we verified
+  /// them, none otherwise. The old hash is no longer served to them.
+  Future<void> _syncAvatar(Contact c) async {
+    if (!c.ready || contacts[c.id] != c) return;
+    final want = c.verified ? settings.avatar : null;
+    if (c.avatarSent == want?.id) return;
+    final old = c.avatarSent;
+    c.avatarSent = want?.id;
+    if (old != null) c.sentMedia.remove(old);
+    await _enqueue(c, ChatMsg(MsgType.avatar, randomBytes(16), media: want));
+    log(want == null ? 'profile picture withdrawn from ${c.name}' : 'profile picture sent to ${c.name}');
+    if (want == null) return;
+    _rememberSent(c, want.id);
+    final bytes = await media.read(want.id);
+    if (bytes == null) return;
+    _lastServed['${c.id}/${want.id}'] = DateTime.now();
+    await _sendChunks(c, want.id, bytes);
+  }
+
   /// Sends a sticker as its hash only; a friend without it asks us for it.
   Future<Message> sendSticker(String contactId, MediaRef ref) async {
     final c = contacts[contactId];
@@ -1289,9 +1335,13 @@ class Messenger {
     for (final c in contacts.values) {
       if (!c.ready) continue;
       final recent = c.messages.length > 200 ? c.messages.sublist(c.messages.length - 200) : c.messages;
-      for (final msg in recent) {
-        final ref = msg.media;
-        if (ref == null || msg.outgoing || await hasMedia(ref.id)) continue;
+      final wanted = [
+        for (final msg in recent)
+          if (!msg.outgoing && msg.media != null) msg.media!,
+        if (c.shownAvatar != null) c.shownAvatar!,
+      ];
+      for (final ref in wanted) {
+        if (await hasMedia(ref.id)) continue;
         final t = _transfers.putIfAbsent(ref.id, () => _Transfer(c.id, ref.chunks)..ref = ref);
         if (t.contactId != c.id || t.requests >= 12) continue;
         final idle = now.difference(t.lastActivity);
@@ -2031,6 +2081,10 @@ class Messenger {
         await _onChunk(c, m);
       case MsgType.mediaRequest:
         _detach(() => _onMediaRequest(c, m));
+      case MsgType.avatar:
+        c.theirAvatar = m.media;
+        _changed();
+        if (m.media != null) _detach(() => _expectMedia(c, m.media!));
     }
   }
 
@@ -2092,6 +2146,7 @@ class Messenger {
       for (final c in contacts.values.toList()) {
         await _handshakeTick(c);
         if (!c.ready) continue;
+        await _syncAvatar(c);
         final lu = c.lastUpdateSent;
         if (lu == null || now.difference(lu) > timings.update || c.receivedSinceUpdate >= 40) {
           await _sendControl(c, MsgType.update);

@@ -103,7 +103,7 @@ class _ChatScreenState extends State<ChatScreen> {
           onTap: () => push(context, ContactScreen(contactId: c.id)),
           child: Row(
             children: [
-              Avatar(c.name, radius: 18),
+              Avatar(c.name, radius: 18, picture: c.shownAvatar),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(

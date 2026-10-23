@@ -1,9 +1,12 @@
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import 'package:zelt_core/constants.dart';
 import 'package:zelt_core/models.dart';
 import '../app_state.dart';
+import '../media_codec.dart';
+import 'chat_screen.dart' show imageFiles;
 import '../updater.dart';
 import 'network_screen.dart';
 import 'widgets.dart';
@@ -233,6 +236,7 @@ class SettingsScreen extends StatelessWidget {
             ),
           ],
           _Header('This device'),
+          const _ProfilePictureTile(),
           ListTile(
             title: const Text('Name shown when pairing'),
             subtitle: Text(s.name.isEmpty ? 'Not set' : s.name),
@@ -291,4 +295,58 @@ class _Header extends StatelessWidget {
     padding: const EdgeInsets.fromLTRB(16, 24, 16, 4),
     child: Text(text, style: Theme.of(context).textTheme.titleSmall?.copyWith(color: Theme.of(context).colorScheme.primary)),
   );
+}
+
+/// Our profile picture. It only goes to contacts we verified, and comes back
+/// from them when we un-verify them or remove it.
+class _ProfilePictureTile extends StatefulWidget {
+  const _ProfilePictureTile();
+
+  @override
+  State<_ProfilePictureTile> createState() => _ProfilePictureTileState();
+}
+
+class _ProfilePictureTileState extends State<_ProfilePictureTile> {
+  bool _busy = false;
+
+  Future<void> _pick() async {
+    final app = context.read<AppState>();
+    final file = await openFile(acceptedTypeGroups: [imageFiles]);
+    if (file == null || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      final p = await prepareAvatar(await file.readAsBytes());
+      await app.m.setAvatar(p.bytes, width: p.width, height: p.height);
+    } on MediaRejected catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Cannot use this image: $e')));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final m = context.watch<AppState>().m;
+    final pic = m.settings.avatar;
+    final verified = m.contacts.values.where((c) => c.verified).length;
+    return ListTile(
+      key: const Key('profilePicture'),
+      leading: _busy
+          ? const SizedBox(width: 40, height: 40, child: Padding(padding: EdgeInsets.all(10), child: CircularProgressIndicator(strokeWidth: 2)))
+          : Avatar(m.settings.name, picture: pic),
+      title: const Text('Profile picture'),
+      subtitle: Text(
+        'Only verified friends see it ($verified now). Friends you un-verify lose it.',
+      ),
+      onTap: _busy ? null : _pick,
+      trailing: pic == null || _busy
+          ? null
+          : IconButton(
+              key: const Key('removeProfilePicture'),
+              tooltip: 'Remove',
+              icon: const Icon(Icons.delete_outline),
+              onPressed: m.clearAvatar,
+            ),
+    );
+  }
 }

@@ -17,6 +17,9 @@ See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the wire format and design choices.
   first time you send it to a friend, after that only its hash. Tap a friend's
   sticker to add it to your own; photos and stickers can be saved to the
   device, rebuilt from pixels so the gallery never sees received bytes.
+- Profile pictures that only verified friends see: yours goes to a friend only
+  after you marked their safety number as matching, and is taken back if you
+  un-verify them. Theirs shows only once you verified them too.
 - Adding a friend takes one action by one person: scan their QR code in person
   (one use, 10 minutes), or paste their one-time invite text (one use,
   15 minutes). Both devices are linked; a safety number lets you check.

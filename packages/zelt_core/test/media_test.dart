@@ -138,6 +138,58 @@ void main() {
     expect(await bob.hasMedia(ref2.id), isFalse);
   });
 
+  test('a profile picture reaches only verified contacts and is withdrawn when un-verified', () async {
+    final (alice, bob, ab, ba) = await friends();
+    final pic = fakeWebp(20000);
+    final ref = await alice.setAvatar(pic, width: 256, height: 256);
+    expect(ref.kind, MediaKind.avatar);
+    // Alice has not verified Bob: nothing goes out.
+    await Future.delayed(const Duration(seconds: 3));
+    expect(ba.theirAvatar, isNull);
+    expect(ab.sentMedia, isNot(contains(ref.id)));
+
+    alice.setVerified(ab.id, true);
+    await until(() => ba.theirAvatar?.id == ref.id, 'picture announced');
+    await untilHas(bob, ref.id);
+    expect(await bob.media.read(ref.id), pic);
+    // Bob has not verified Alice yet: he does not show it.
+    expect(ba.shownAvatar, isNull);
+    bob.setVerified(ba.id, true);
+    expect(ba.shownAvatar?.id, ref.id);
+    // Nothing goes back to Alice: Bob has no picture.
+    expect(ab.theirAvatar, isNull);
+
+    // A new picture replaces the old one; the old one is no longer served.
+    final ref2 = await alice.setAvatar(fakeWebp(15000), width: 200, height: 200);
+    await until(() => ba.theirAvatar?.id == ref2.id, 'new picture');
+    expect(ab.sentMedia, isNot(contains(ref.id)));
+
+    // Un-verifying takes it back, and requests for it are refused.
+    alice.setVerified(ab.id, false);
+    await until(() => ba.theirAvatar == null, 'picture withdrawn');
+    expect(ab.sentMedia, isNot(contains(ref2.id)));
+    expect(ab.avatarSent, isNull);
+  });
+
+  test('a removed profile picture is withdrawn from everyone', () async {
+    final (alice, _, ab, ba) = await friends();
+    alice.setVerified(ab.id, true);
+    await alice.setAvatar(fakeWebp(9000), width: 128, height: 128);
+    await until(() => ba.theirAvatar != null, 'picture');
+    alice.clearAvatar();
+    await until(() => ba.theirAvatar == null, 'withdrawn');
+  });
+
+  test('each message type carries only its own kind of media', () {
+    MediaRef ref(MediaKind k) => MediaRef(hash: randomBytes(32), size: 1000, kind: k, format: MediaFormat.webp, width: 100, height: 100);
+    Uint8List msg(MsgType t, MediaKind k) => ChatMsg(t, randomBytes(16), media: ref(k)).encode();
+    expect(ChatMsg.decode(msg(MsgType.avatar, MediaKind.avatar)).media!.kind, MediaKind.avatar);
+    expect(ChatMsg.decode(ChatMsg(MsgType.avatar, randomBytes(16)).encode()).media, isNull);
+    expect(() => ChatMsg.decode(msg(MsgType.avatar, MediaKind.sticker)), throwsFormatException);
+    expect(() => ChatMsg.decode(msg(MsgType.image, MediaKind.avatar)), throwsFormatException);
+    expect(() => ChatMsg.decode(msg(MsgType.sticker, MediaKind.image)), throwsFormatException);
+  });
+
   test('media references outside the limits are rejected before any transfer', () {
     Uint8List enc(MediaKind k, int f, int size, int w, int h) {
       final wr = ByteWriter();
@@ -154,6 +206,8 @@ void main() {
       enc(MediaKind.sticker, MediaFormat.webp, maxStickerBytes + 1, 100, 100),
       enc(MediaKind.sticker, MediaFormat.webp, 1000, maxStickerSide + 1, 10),
       enc(MediaKind.sticker, MediaFormat.webp, 0, 10, 10),
+      enc(MediaKind.avatar, MediaFormat.webp, maxAvatarBytes + 1, 100, 100),
+      enc(MediaKind.avatar, MediaFormat.webp, 1000, maxAvatarSide + 1, 100),
     ]) {
       expect(() => MediaRef.read(ByteReader(bad)), throwsFormatException);
     }

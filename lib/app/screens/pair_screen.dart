@@ -222,6 +222,7 @@ class _PairScreenState extends State<PairScreen> {
                 key: const Key('numbersMatch'),
                 contentPadding: EdgeInsets.zero,
                 title: const Text('Numbers match'),
+                subtitle: const Text('Also shares your profile picture with them'),
                 value: linked.verified,
                 onChanged: (v) => setState(() => _app.m.setVerified(linked.id, v)),
               ),

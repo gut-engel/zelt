@@ -8,6 +8,7 @@ import 'package:zelt_core/models.dart';
 import 'package:zelt/app/screens/pair_screen.dart';
 import 'package:zelt/main.dart';
 import 'package:zelt/app/media_view.dart';
+import 'package:zelt/app/screens/settings_screen.dart';
 import 'package:zelt_core/bytes.dart';
 import 'package:zelt_core/media.dart';
 import 'package:zelt_core/ratchet.dart';
@@ -32,6 +33,7 @@ void main() {
   mediaScreens();
   pairQrAutoHide();
   pairLinked();
+  profilePictures();
 }
 
 Future<AppState> unlockedWithFriend(WidgetTester tester) async {
@@ -207,6 +209,37 @@ void mediaScreens() {
     await tester.tap(find.byTooltip('Stickers'));
     await tester.pump(const Duration(milliseconds: 500));
     expect(find.byKey(const Key('addSticker')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(seconds: 1));
+  });
+}
+
+void profilePictures() {
+  testWidgets('a friend\'s profile picture shows only once they are verified', (tester) async {
+    final app = await unlockedWithFriend(tester);
+    final c = app.m.contacts.values.single;
+    final pic = MediaRef(hash: randomBytes(32), size: 1000, kind: MediaKind.avatar, format: MediaFormat.webp, width: 256, height: 256);
+    c.theirAvatar = pic;
+    await tester.runAsync(() async {
+      MediaCache.instance.put(pic.id, MediaFrames([await createTestImage(width: 64, height: 64)], [100]));
+    });
+    await tester.pumpWidget(ChangeNotifierProvider.value(value: app, child: const ZeltApp()));
+    await tester.pump();
+    expect(find.text('Robin'), findsOneWidget);
+    expect(find.byType(RawImage), findsNothing, reason: 'not verified: initials only');
+    expect(find.text('R'), findsOneWidget);
+    app.m.setVerified(c.id, true);
+    await tester.tap(find.text('Robin'));
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.byType(RawImage), findsOneWidget, reason: 'verified: the chat shows the picture');
+    // Our own picture is set in the settings.
+    await tester.pumpWidget(ChangeNotifierProvider.value(value: app, child: const MaterialApp(home: SettingsScreen())));
+    await tester.pump();
+    await tester.scrollUntilVisible(find.byKey(const Key('profilePicture')), 200);
+    expect(find.byKey(const Key('profilePicture')), findsOneWidget);
+    expect(find.textContaining('Only verified friends see it (1 now)'), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
     await tester.pump(const Duration(seconds: 1));

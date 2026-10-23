@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:zelt_core/media.dart';
 import 'package:zelt_core/models.dart';
 
 import '../app_state.dart';
+import '../media_view.dart';
 import 'network_screen.dart';
 
 Future<T?> push<T>(BuildContext context, Widget page) =>
@@ -23,20 +25,42 @@ String formatBytes(int b) {
   return '${(b / 1024 / 1024).toStringAsFixed(1)} MB';
 }
 
+/// A contact's (or our own) profile picture, or the name's first letter
+/// while there is none or it is still on its way. Decoded like every
+/// received image (see media_view.dart).
 class Avatar extends StatelessWidget {
   final String name;
   final double radius;
-  const Avatar(this.name, {super.key, this.radius = 20});
+  final MediaRef? picture;
+  const Avatar(this.name, {super.key, this.radius = 20, this.picture});
 
   @override
   Widget build(BuildContext context) {
     final s = Theme.of(context).colorScheme;
     final letter = name.isEmpty ? '?' : name.characters.first.toUpperCase();
-    return CircleAvatar(
+    final initials = CircleAvatar(
       radius: radius,
       backgroundColor: s.primaryContainer,
       foregroundColor: s.onPrimaryContainer,
       child: Text(letter),
+    );
+    final p = picture;
+    if (p == null) return initials;
+    return ClipOval(
+      child: SizedBox.square(
+        dimension: radius * 2,
+        child: FittedBox(
+          fit: BoxFit.cover,
+          child: MediaView(
+            key: ValueKey(p.id),
+            messenger: context.read<AppState>().m,
+            media: p,
+            maxWidth: radius * 2,
+            maxHeight: radius * 2,
+            placeholder: initials,
+          ),
+        ),
+      ),
     );
   }
 }
