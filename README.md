@@ -134,7 +134,60 @@ again. Friends' apps pass it on automatically.
   kept in RAM (12 MB cap, 7 days at most). The only file is the relay's own key,
   in the Docker volume `zelt-relay-data`.
 
-To do it by hand:
+### Without the installer: Docker Compose
+
+Save this as `docker-compose.yml` in an empty directory, put your server's
+public address in `ZELT_PUBLIC_IP`, and run `docker compose up -d --build`.
+Docker fetches the pinned release from GitHub and builds it; nothing else needs
+to be downloaded.
+
+```yaml
+# zelt relay. Edit ZELT_PUBLIC_IP, then: docker compose up -d --build
+services:
+  zelt-relay:
+    build:
+      # A pinned release. Update: change the tag, run the same command again.
+      context: https://github.com/gut-engel/zelt.git#v1.0.4
+      dockerfile: relay/Dockerfile
+    image: zelt-relay
+    container_name: zelt-relay
+    restart: unless-stopped
+    network_mode: host
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 100
+    logging:
+      options: { max-size: "1m", max-file: "3" }
+    environment:
+      ZELT_PORT: "47017"
+      # Your public IPv4 and/or IPv6 address, comma-separated.
+      ZELT_PUBLIC_IP: "203.0.113.7"
+      # Optional: other relays to announce this one to (zelt-relay:... strings).
+      ZELT_PEERS: ""
+    volumes:
+      - zelt-relay-data:/data
+
+volumes:
+  zelt-relay-data:
+    name: zelt-relay-data
+```
+
+- **Share it:** `docker compose logs zelt-relay` shows the `zelt-relay:…` string
+  and its QR code; add it in the app as above.
+- **Firewall:** open the TCP port (47017) yourself.
+- **Updates:** there is no auto-update. Set the tag in `context` to the newest
+  release and run `docker compose up -d --build` again; the relay key stays in
+  the `zelt-relay-data` volume (the same one the installer uses, so you can
+  switch between the two, but run only one of them).
+- **Signatures:** Compose does not check the tag's signature (the installer
+  does). To check it yourself, clone the repository, run the `verify-tag`
+  command above, and set `context: ./zelt` (your checkout, at that tag) instead
+  of the URL.
+
+### By hand
+
 
 ```sh
 docker build -t zelt-relay -f relay/Dockerfile .

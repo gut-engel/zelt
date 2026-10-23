@@ -46,6 +46,7 @@ ssh_pub=$(awk '{print $1" "$2}' "$SIGNING_DIR/release-ssh.pub")
 grep -qF "$ssh_pub" scripts/allowed_signers || die "release-ssh.pub is not in scripts/allowed_signers"
 grep -qF "$ssh_pub" scripts/install-relay.sh || die "release-ssh.pub is not pinned in scripts/install-relay.sh"
 grep -q "^version: $V+$B\$" pubspec.yaml || die "pubspec.yaml version is not $V+$B"
+grep -qF "zelt.git#v$V" README.md || die "the docker-compose.yml in README.md does not pin v$V"
 
 # The last published manifest (verified) must have a lower build number,
 # or no app would ever install this release.
