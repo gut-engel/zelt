@@ -53,8 +53,6 @@ class ContactScreen extends StatelessWidget {
     final c = m.contacts[contactId];
     if (c == null) return const Scaffold();
     final t = Theme.of(context);
-    final groups = c.keys.safetyNumber.split(' ');
-    final rows = [for (var i = 0; i < groups.length; i += 4) groups.skip(i).take(4).join('  ')];
     return Scaffold(
       appBar: AppBar(
         title: Text(c.name),
@@ -69,20 +67,7 @@ class ContactScreen extends StatelessWidget {
           const SizedBox(height: 24),
           Text('Safety number', style: t.textTheme.titleMedium),
           const SizedBox(height: 8),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                children: [
-                  for (final r in rows)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 2),
-                      child: Text(r, style: t.textTheme.titleMedium?.copyWith(fontFamily: 'monospace')),
-                    ),
-                ],
-              ),
-            ),
-          ),
+          SafetyNumberCard(c),
           const SizedBox(height: 8),
           Text(
             'Compare this with ${c.name}\'s screen while you are together. If '

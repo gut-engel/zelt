@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:zelt_core/models.dart';
 
 import '../app_state.dart';
 import 'network_screen.dart';
@@ -142,6 +143,35 @@ class UpdateBanner extends StatelessWidget {
               ),
             ),
             TextButton(onPressed: busy ? null : app.installUpdate, child: const Text('Update')),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A contact's safety number, in rows of four groups, for comparing with the
+/// friend's screen.
+class SafetyNumberCard extends StatelessWidget {
+  final Contact contact;
+  const SafetyNumberCard(this.contact, {super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context);
+    final groups = contact.keys.safetyNumber.split(' ');
+    final rows = [for (var i = 0; i < groups.length; i += 4) groups.skip(i).take(4).join('  ')];
+    return Card(
+      key: const Key('safetyNumber'),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            for (final r in rows)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 2),
+                child: Text(r, style: t.textTheme.titleMedium?.copyWith(fontFamily: 'monospace')),
+              ),
           ],
         ),
       ),

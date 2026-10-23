@@ -10,6 +10,7 @@ import 'package:zelt/main.dart';
 import 'package:zelt/app/media_view.dart';
 import 'package:zelt_core/bytes.dart';
 import 'package:zelt_core/media.dart';
+import 'package:zelt_core/ratchet.dart';
 
 void main() {
   testWidgets('first launch shows identity setup', (tester) async {
@@ -30,6 +31,7 @@ void main() {
   pairScreen();
   mediaScreens();
   pairQrAutoHide();
+  pairLinked();
 }
 
 Future<AppState> unlockedWithFriend(WidgetTester tester) async {
@@ -120,6 +122,44 @@ void pairScreen() {
     await tester.pump();
     expect(find.textContaining('in-person QR code'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+}
+
+void pairLinked() {
+  testWidgets('a friend scanning our code shows the safety number and the end of the key exchange', (tester) async {
+    final app = await unlockedWithFriend(tester);
+    await tester.runAsync(() => app.m.node.start(relay: true));
+    addTearDown(() => tester.runAsync(() => app.m.node.stop()));
+    final inv = (await tester.runAsync(() => app.m.createInvite()))!;
+    await tester.pumpWidget(ChangeNotifierProvider.value(
+      value: app,
+      child: MaterialApp(home: PairScreen(invite: inv)),
+    ));
+    // The friend's join request: the invite is used up and a contact appears,
+    // its key exchange still running.
+    final c = (await tester.runAsync(() async {
+      final f = Messenger(identity: await Identity.generate(), settings: Settings(name: 'Sam'));
+      final sa = await app.m.newPairingSession();
+      final sf = await f.newPairingSession();
+      app.m.cancelInvite(inv.id);
+      return app.m.completePairing(sa, sf.code);
+    }))!;
+    await tester.pump();
+    expect(c.ready, isFalse);
+    expect(find.byIcon(Icons.hourglass_top), findsOneWidget);
+    expect(find.byKey(const Key('safetyNumber')), findsOneWidget);
+    expect(find.textContaining(c.keys.safetyNumber.split(' ').first), findsOneWidget);
+    // The key exchange finishes later: the screen follows without any input.
+    await tester.runAsync(() async => c.ratchet = await Ratchet.bob(randomBytes(32), c.myEph));
+    app.m.renameContact(c.id, c.name);
+    await tester.pump();
+    expect(find.byIcon(Icons.check_circle), findsOneWidget);
+    expect(find.byIcon(Icons.hourglass_top), findsNothing);
+    await tester.tap(find.byKey(const Key('numbersMatch')));
+    await tester.pump();
+    expect(app.m.contacts[c.id]!.verified, isTrue);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(minutes: 3));
   });
 }
 

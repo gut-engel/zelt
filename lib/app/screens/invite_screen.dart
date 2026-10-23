@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 import 'package:zelt_core/invite.dart';
 import 'package:zelt_core/models.dart';
 import '../app_state.dart';
+import 'widgets.dart';
 
 /// The second way to add a friend: a one-time invite text, sent over any
 /// channel. One use only; unused, it stops working after 15 minutes.
@@ -261,12 +262,24 @@ class _InviteScreenState extends State<InviteScreen> {
                   title: Text(joined.ready ? 'Added ${joined.name}' : 'Waiting for ${joined.name} to accept…'),
                   subtitle: Text(
                     joined.ready
-                        ? 'Compare safety numbers in their contact screen.'
+                        ? 'Compare the safety number below with ${joined.name}.'
                         : 'Their device has to be online before the invite expires. '
                               'If someone else used the invite first, this never completes.',
                   ),
                 ),
               ),
+            if (joined != null) ...[
+              const SizedBox(height: 8),
+              Text('Safety number', style: t.textTheme.titleMedium),
+              const SizedBox(height: 8),
+              SafetyNumberCard(joined),
+              const SizedBox(height: 8),
+              Text(
+                'Compare it with ${joined.name}\'s screen, in person or on a call where you '
+                'recognise each other. If it matches, nobody intercepted the invite.',
+                style: t.textTheme.bodySmall,
+              ),
+            ],
             if (_error != null) ...[
               const SizedBox(height: 12),
               Text(_error!, style: TextStyle(color: t.colorScheme.error)),

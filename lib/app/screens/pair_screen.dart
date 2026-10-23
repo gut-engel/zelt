@@ -76,9 +76,14 @@ class _PairScreenState extends State<PairScreen> {
     }
   }
 
-  /// The friend scanned our code: their join request linked us.
+  /// The friend scanned our code: their join request linked us. Once linked,
+  /// keeps redrawing until the key exchange is done.
   void _onChange() {
-    if (!mounted || _linked != null) return;
+    if (!mounted) return;
+    if (_linked != null) {
+      setState(() {});
+      return;
+    }
     final inv = _invite;
     if (inv == null || _app.m.invites.containsKey(inv.id)) return;
     final c = _app.m.contacts.values.where((c) => !identical(_before[c.id], c)).lastOrNull;
@@ -196,10 +201,31 @@ class _PairScreenState extends State<PairScreen> {
                 child: ListTile(
                   leading: Icon(linked.ready ? Icons.check_circle : Icons.hourglass_top),
                   title: Text(linked.ready ? 'Linked with ${linked.name}' : 'Linking with ${linked.name}…'),
-                  subtitle: const Text('Compare safety numbers in their contact screen to be sure.'),
+                  subtitle: Text(
+                    linked.ready
+                        ? 'End-to-end encrypted.'
+                        : 'Finishing the key exchange; this needs ${linked.name}\'s device online.',
+                  ),
                 ),
               ),
               const SizedBox(height: 16),
+              Text('Safety number', style: t.textTheme.titleMedium),
+              const SizedBox(height: 8),
+              SafetyNumberCard(linked),
+              const SizedBox(height: 8),
+              Text(
+                'Compare this with ${linked.name}\'s screen now, while you are together. If the '
+                'numbers match, nobody swapped a code during pairing.',
+                style: t.textTheme.bodySmall,
+              ),
+              SwitchListTile(
+                key: const Key('numbersMatch'),
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Numbers match'),
+                value: linked.verified,
+                onChanged: (v) => setState(() => _app.m.setVerified(linked.id, v)),
+              ),
+              const SizedBox(height: 8),
               FilledButton(onPressed: () => Navigator.pop(context), child: const Text('Done')),
             ] else ...[
               Text('Let your friend scan this code', style: t.textTheme.titleMedium),
